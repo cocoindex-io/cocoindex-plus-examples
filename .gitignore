@@ -1,0 +1,23 @@
+/target
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.venv*/
+dist/
+
+.DS_Store
+
+*.egg-info/
+
+# Output of `cocoindex eval`
+examples/**/eval_*
+
+/.vscode
+/*.session.sql

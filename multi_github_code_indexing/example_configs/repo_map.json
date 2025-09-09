@@ -1,0 +1,28 @@
+{
+    "cocoindex_md": {
+        "repo_owner": "cocoindex-io",
+        "repo_name": "cocoindex",
+        "git_ref": "main",
+        "included_patterns": [
+            "*.md",
+            "*.mdx"
+        ],
+        "excluded_patterns": [
+            "**/.*",
+            "target",
+            "**/node_modules"
+        ]
+    },
+    "cocoindex_py": {
+        "repo_owner": "cocoindex-io",
+        "repo_name": "cocoindex",
+        "git_ref": "main",
+        "included_patterns": [
+            "*.py"
+        ],
+        "path": "python/",
+        "excluded_patterns": [
+            "**/.*"
+        ]
+    }
+}

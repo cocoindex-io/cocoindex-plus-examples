@@ -1,0 +1,12 @@
+# © 2025 CocoIndex Inc. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
+
+[project]
+name = "github-code-indexing"
+version = "0.1.0"
+description = "Simple example for cocoindex: build embedding index based on GitHub repository source code."
+requires-python = ">=3.11"
+dependencies = ["cocoindex-plus[embeddings]>=0.1.0", "python-dotenv>=1.0.1"]
+
+[tool.setuptools]
+packages = []
