@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 import datetime
 from threading import Lock
+from typing import Callable
 import json
 import dotenv
 
@@ -204,7 +205,7 @@ def code_to_embedding(
 
 
 # This is the factory function that builds the code indexing flow for a given repo info.
-def _build_code_indexing_flow(repo_config: _GitHubRepoConfig) -> None:
+def _build_code_indexing_flow(repo_config: _GitHubRepoConfig) -> Callable[..., None]:
     """
     Define an example flow that embeds files into a vector database.
     """
