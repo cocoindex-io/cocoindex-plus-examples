@@ -65,6 +65,8 @@ def github_code_indexing_flow(
                 "*.mdx",
             ],
             excluded_patterns=["**/.*", "target", "**/node_modules"],
+            # Optional, can be omitted if using "https://github.com"
+            api_base_url="https://api.github.com",
         )
     )
     code_embeddings = data_scope.add_collector()
