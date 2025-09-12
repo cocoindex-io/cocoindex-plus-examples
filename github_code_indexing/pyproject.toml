@@ -7,7 +7,7 @@ version = "0.1.0"
 description = "Simple example for cocoindex: build embedding index based on GitHub repository source code."
 requires-python = ">=3.11"
 dependencies = [
-    "cocoindex-plus[embeddings]>=0.1.0",
+    "cocoindex-plus[embeddings]>=0.1.4",
     "python-dotenv>=1.0.1",
     "pgvector>=0.4.1",
     "psycopg[binary,pool]",
@@ -15,3 +15,16 @@ dependencies = [
 
 [tool.setuptools]
 packages = []
+
+[tool.uv.sources]
+cocoindex-plus = { index = "keygen" }
+
+[[tool.uv.index]]
+name = "keygen"
+explicit = true
+
+# You need to set the following environment variable to use the Keygen index:
+# - UV_INDEX_KEYGEN_USERNAME=token
+# - UV_INDEX_KEYGEN_PASSWORD=<your-installation-token>
+url = "https://pypi.pkg.keygen.sh/cocoindex-io/simple"
+cache-control = { api = "no-cache" }

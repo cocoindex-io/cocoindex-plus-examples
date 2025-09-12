@@ -21,3 +21,5 @@ examples/**/eval_*
 
 /.vscode
 /*.session.sql
+
+uv.lock
