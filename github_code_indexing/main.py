@@ -53,6 +53,9 @@ def github_code_indexing_flow(
             ),
             owner="cocoindex-io",
             repo="cocoindex",
+            # owner="georgeh0",
+            # repo="llvm-project",
+            # path="clang",
             git_ref="main",
             included_patterns=[
                 "*.py",
@@ -65,7 +68,7 @@ def github_code_indexing_flow(
                 "*.mdx",
             ],
             excluded_patterns=["**/.*", "target", "**/node_modules"],
-            # Optional, can be omitted if using "https://github.com"
+            # Optional, can be omitted if using "https://api.github.com"
             api_base_url="https://api.github.com",
         )
     )
