@@ -6,7 +6,10 @@ import datetime
 from threading import Lock
 from typing import Callable
 import json
+import functools
 import dotenv
+from psycopg_pool import ConnectionPool
+from pgvector.psycopg import register_vector
 
 import cocoindex
 import os
@@ -55,9 +58,8 @@ class _CodeIndexingFlows:
                 updater.wait()
                 existing_flow.close()
 
-            flow = cocoindex.open_flow(
-                f"{self._flow_name_prefix}_{key}",
-                _build_code_indexing_flow(repo_config),
+            flow = _build_code_indexing_flow(
+                f"{self._flow_name_prefix}_{key}", repo_config
             )
             flow.setup(report_to_stdout=True)
             updater = cocoindex.FlowLiveUpdater(
@@ -204,13 +206,27 @@ def code_to_embedding(
     )
 
 
+@functools.cache
+def connection_pool() -> ConnectionPool:
+    """
+    Get a connection pool to the database.
+    """
+    return ConnectionPool(os.environ["COCOINDEX_DATABASE_URL"])
+
+
+TOP_K = 5
+
+
 # This is the factory function that builds the code indexing flow for a given repo info.
-def _build_code_indexing_flow(repo_config: _GitHubRepoConfig) -> Callable[..., None]:
+def _build_code_indexing_flow(
+    flow_name: str, repo_config: _GitHubRepoConfig
+) -> cocoindex.Flow:
     """
     Define an example flow that embeds files into a vector database.
     """
 
-    def _flow_def(
+    @cocoindex.flow_def(name=flow_name)
+    def flow(
         flow_builder: cocoindex.FlowBuilder, data_scope: cocoindex.DataScope
     ) -> None:
         data_scope["files"] = flow_builder.add_source(
@@ -262,7 +278,47 @@ def _build_code_indexing_flow(repo_config: _GitHubRepoConfig) -> Callable[..., N
             ],
         )
 
-    return _flow_def
+    @flow.query_handler(
+        name="search",
+        result_fields=cocoindex.QueryHandlerResultFields(
+            embedding=["embedding"], score="score"
+        ),
+    )
+    def search(query: str) -> None:
+        # Get the table name, for the export target in the github_code_indexing_flow above.
+        table_name = cocoindex.utils.get_target_default_name(flow, "code_embeddings")
+        # Evaluate the transform flow defined above with the input query, to get the embedding.
+        query_vector = code_to_embedding.eval(query)
+        # Run the query and get the results.
+        with connection_pool().connection() as conn:
+            register_vector(conn)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT filename, code, embedding, embedding <=> %s AS distance, start, "end"
+                    FROM {table_name} ORDER BY distance LIMIT %s
+                """,
+                    (query_vector, TOP_K),
+                )
+                return cocoindex.QueryOutput(
+                    query_info=cocoindex.QueryInfo(
+                        embedding=query_vector,
+                        similarity_metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
+                    ),
+                    results=[
+                        {
+                            "filename": row[0],
+                            "code": row[1],
+                            "embedding": row[2],
+                            "score": 1.0 - row[3],
+                            "start": row[4],
+                            "end": row[5],
+                        }
+                        for row in cur.fetchall()
+                    ],
+                )
+
+    return flow
 
 
 if __name__ == "__main__":
