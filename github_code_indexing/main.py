@@ -11,11 +11,28 @@ import os
 from numpy.typing import NDArray
 import numpy as np
 
+import cocoindex.functions.chonkie as coco_chonkie
+
 
 @cocoindex.op.function()
 def extract_extension(filename: str) -> str:
     """Extract the extension of a filename."""
     return os.path.splitext(filename)[1]
+
+
+@cocoindex.op.function()
+def extract_language(extension: str) -> str | None:
+    """Extract the extension of a filename."""
+    match extension:
+        case ".py":
+            return "python"
+        case ".md" | ".mdx":
+            return "markdown"
+        case ".toml":
+            return "toml"
+        case ".rs":
+            return "rust"
+    return None
 
 
 @cocoindex.transform_flow()
@@ -77,6 +94,8 @@ def github_code_indexing_flow(
 
     with data_scope["files"].row() as file:
         file["extension"] = file["filename"].transform(extract_extension)
+
+        # Use SplitRecursively
         file["chunks"] = file["content"].transform(
             cocoindex.functions.SplitRecursively(),
             language=file["extension"],
@@ -84,6 +103,33 @@ def github_code_indexing_flow(
             min_chunk_size=300,
             chunk_overlap=300,
         )
+
+        # Use ChonkieRecursiveChunker
+        #   file["chunks"] = file["content"].transform(
+        #       coco_chonkie.ChonkieRecursiveChunker(
+        #           chunk_size=1000,
+        #       )
+        #   )
+
+        # Use ChonkieCodeChunker
+        #   file["language"] = file["extension"].transform(extract_language)
+        #   file["chunks"] = file["content"].transform(
+        #       coco_chonkie.ChonkieCodeChunker(chunk_size=1000),
+        #       language=file["language"],
+        #   )
+
+        # Use ChonkieSemanticChunker
+        #   file["chunks"] = file["content"].transform(
+        #       coco_chonkie.ChonkieSemanticChunker(
+        #           chunk_size=1000,
+        #       )
+        #   )
+
+        # Use ChonkieNeuralChunker
+        #    file["chunks"] = file["content"].transform(
+        #        coco_chonkie.ChonkieNeuralChunker(device_map="mps"),
+        #    )
+
         with file["chunks"].row() as chunk:
             chunk["embedding"] = chunk["text"].call(code_to_embedding)
             code_embeddings.collect(
