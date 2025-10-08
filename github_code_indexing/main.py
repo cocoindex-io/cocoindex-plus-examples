@@ -4,7 +4,6 @@
 from dotenv import load_dotenv
 from psycopg_pool import ConnectionPool
 from pgvector.psycopg import register_vector
-from typing import Any
 import functools
 import cocoindex
 import os
@@ -12,27 +11,6 @@ from numpy.typing import NDArray
 import numpy as np
 
 import cocoindex.functions.chonkie as coco_chonkie
-
-
-@cocoindex.op.function()
-def extract_extension(filename: str) -> str:
-    """Extract the extension of a filename."""
-    return os.path.splitext(filename)[1]
-
-
-@cocoindex.op.function()
-def extract_language(extension: str) -> str | None:
-    """Extract the extension of a filename."""
-    match extension:
-        case ".py":
-            return "python"
-        case ".md" | ".mdx":
-            return "markdown"
-        case ".toml":
-            return "toml"
-        case ".rs":
-            return "rust"
-    return None
 
 
 @cocoindex.transform_flow()
@@ -93,16 +71,18 @@ def github_code_indexing_flow(
     code_embeddings = data_scope.add_collector()
 
     with data_scope["files"].row() as file:
-        file["extension"] = file["filename"].transform(extract_extension)
+        file["language"] = file["filename"].transform(
+            cocoindex.functions.DetectProgrammingLanguage()
+        )
 
         # Use SplitRecursively
-        file["chunks"] = file["content"].transform(
-            cocoindex.functions.SplitRecursively(),
-            language=file["extension"],
-            chunk_size=1000,
-            min_chunk_size=300,
-            chunk_overlap=300,
-        )
+        # file["chunks"] = file["content"].transform(
+        #     cocoindex.functions.SplitRecursively(),
+        #     language=file["language"],
+        #     chunk_size=1000,
+        #     min_chunk_size=300,
+        #     chunk_overlap=300,
+        # )
 
         # Use ChonkieRecursiveChunker
         #   file["chunks"] = file["content"].transform(
@@ -112,11 +92,10 @@ def github_code_indexing_flow(
         #   )
 
         # Use ChonkieCodeChunker
-        #   file["language"] = file["extension"].transform(extract_language)
-        #   file["chunks"] = file["content"].transform(
-        #       coco_chonkie.ChonkieCodeChunker(chunk_size=1000),
-        #       language=file["language"],
-        #   )
+        file["chunks"] = file["content"].transform(
+            coco_chonkie.ChonkieCodeChunker(chunk_size=1000),
+            language=file["language"],
+        )
 
         # Use ChonkieSemanticChunker
         #   file["chunks"] = file["content"].transform(
@@ -143,7 +122,11 @@ def github_code_indexing_flow(
 
     code_embeddings.export(
         "code_embeddings",
-        cocoindex.targets.Postgres(),
+        cocoindex.targets.Postgres(
+            column_options={
+                "embedding": cocoindex.targets.PostgresColumnOptions(type="halfvec"),
+            }
+        ),
         primary_key_fields=["filename", "location"],
         vector_indexes=[
             cocoindex.VectorIndexDef(
