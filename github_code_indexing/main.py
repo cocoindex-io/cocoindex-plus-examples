@@ -66,7 +66,8 @@ def github_code_indexing_flow(
             excluded_patterns=["**/.*", "target", "**/node_modules"],
             # Optional, can be omitted if using "https://api.github.com"
             api_base_url="https://api.github.com",
-        )
+        ),
+        rate_limit=cocoindex.RateLimit(max_rows_per_second=1),
     )
     code_embeddings = data_scope.add_collector()
 
