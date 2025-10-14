@@ -29,6 +29,15 @@ class _GitHubRepoConfig:
     excluded_patterns: list[str] | None = None
 
 
+def _get_github_app_spec() -> cocoindex.sources.GitHubApp:
+    return cocoindex.sources.GitHubApp(
+        app_id=int(os.environ["GITHUB_APP_ID"]),
+        private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
+        # Global rate limit shared by all sources using the same app.
+        rate_limit=cocoindex.RateLimit(max_rows_per_second=1),
+    )
+
+
 ####################################################################################################
 # Code to define meta flow: the CocoIndex flow that manages code indexing flows for multiple repos.
 ####################################################################################################
@@ -144,10 +153,7 @@ def meta_flow(
         # from a GitHub repo, e.g.,
         #
         #   cocoindex.sources.GitHub(
-        #       app=cocoindex.sources.GitHubApp(
-        #           app_id=int(os.environ["GITHUB_APP_ID"]),
-        #           private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-        #       ),
+        #       app=_get_github_app_spec(),
         #       owner="cocoindex-io",
         #       repo="cocoindex-plus",
         #       git_ref="main",
@@ -231,10 +237,7 @@ def _build_code_indexing_flow(
     ) -> None:
         data_scope["files"] = flow_builder.add_source(
             cocoindex.sources.GitHub(
-                app=cocoindex.sources.GitHubApp(
-                    app_id=int(os.environ["GITHUB_APP_ID"]),
-                    private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-                ),
+                app=_get_github_app_spec(),
                 owner=repo_config.repo_owner,
                 repo=repo_config.repo_name,
                 git_ref=repo_config.git_ref,
