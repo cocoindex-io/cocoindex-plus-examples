@@ -66,15 +66,20 @@ class _CodeIndexingFlows:
                 updater.abort()
                 updater.wait()
                 existing_flow.close()
+                del self._flows[key]
 
             flow = _build_code_indexing_flow(
                 f"{self._flow_name_prefix}_{key}", repo_config
             )
-            flow.setup(report_to_stdout=True)
-            updater = cocoindex.FlowLiveUpdater(
-                flow, cocoindex.FlowLiveUpdaterOptions(print_stats=True)
-            )
-            updater.start()
+            try:
+                flow.setup(report_to_stdout=True)
+                updater = cocoindex.FlowLiveUpdater(
+                    flow, cocoindex.FlowLiveUpdaterOptions(print_stats=True)
+                )
+                updater.start()
+            except Exception as e:
+                flow.close()
+                raise e
             self._flows[key] = (flow, updater)
 
     def delete_flow(self, key: str) -> None:
