@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 import datetime
 from threading import Lock
-from typing import Callable
 import json
 import functools
 import dotenv
@@ -15,6 +14,15 @@ import cocoindex
 import os
 from numpy.typing import NDArray
 import numpy as np
+
+# Add a safeguard period for now. A flow, if closing happens more than this
+# duration after it is opened, avoid closing it.
+# This is because currently configs from different source files are treated as
+# different source rows, so a upsert + a delete are triggered in parallel for
+# the specific config item. This adds a safeguard period to avoid closing the
+# flow immediately after it is opened in this case.
+# After we have official source-level multi-tenant support, we won't need this.
+FLOW_OPEN_SAFEGUARD_DURATION = datetime.timedelta(seconds=5)
 
 
 # Config for a GitHub repo to be indexed.
@@ -27,6 +35,8 @@ class _GitHubRepoConfig:
     path: str | None = None
     included_patterns: list[str] | None = None
     excluded_patterns: list[str] | None = None
+
+    to_delete: bool = False
 
 
 def _get_github_app_spec() -> cocoindex.sources.GitHubApp:
@@ -52,7 +62,9 @@ class _GitHubRepoConfigRow:
 class _CodeIndexingFlows:
     _flow_name_prefix: str
     _flows_lock: Lock
-    _flows: dict[str, tuple[cocoindex.Flow, cocoindex.FlowLiveUpdater]]
+    _flows: dict[
+        str, tuple[cocoindex.Flow, cocoindex.FlowLiveUpdater, datetime.datetime]
+    ]
 
     def __init__(self, flow_name_prefix: str):
         self._flow_name_prefix = flow_name_prefix
@@ -62,7 +74,7 @@ class _CodeIndexingFlows:
     def upsert_flow(self, key: str, repo_config: _GitHubRepoConfig) -> None:
         with self._flows_lock:
             if key in self._flows:
-                existing_flow, updater = self._flows[key]
+                existing_flow, updater, _ = self._flows[key]
                 updater.abort()
                 updater.wait()
                 existing_flow.close()
@@ -80,7 +92,7 @@ class _CodeIndexingFlows:
             except Exception as e:
                 flow.close()
                 raise e
-            self._flows[key] = (flow, updater)
+            self._flows[key] = (flow, updater, datetime.datetime.now())
 
     def delete_flow(self, key: str) -> None:
         with self._flows_lock:
@@ -89,12 +101,26 @@ class _CodeIndexingFlows:
             # We will lift this limitation and allow to directly drop the flow by name later.
 
             if key in self._flows:
-                flow, updater = self._flows[key]
+                flow, updater, _ = self._flows[key]
                 updater.abort()
                 updater.wait()
                 flow.drop(report_to_stdout=True)
-                flow.close()
-                del self._flows[key]
+
+    def close_flow(self, key: str) -> None:
+        with self._flows_lock:
+            if key in self._flows:
+                flow, updater, open_time = self._flows[key]
+                open_duration = datetime.datetime.now() - open_time
+                if open_duration > FLOW_OPEN_SAFEGUARD_DURATION:
+                    print(f"Closing flow {key}.")
+                    updater.abort()
+                    updater.wait()
+                    flow.close()
+                    del self._flows[key]
+                else:
+                    print(
+                        f"Skipping closing flow {key} because it has been open for {open_duration} < {FLOW_OPEN_SAFEGUARD_DURATION}."
+                    )
 
 
 # _CodeIndexingFlowsManager is a CocoIndex target that synchronizes all repo configs with
@@ -130,6 +156,8 @@ class _CodeIndexingFlowsManagerConnector:
         for flows, mutations in all_mutations:
             for key, mutation in mutations.items():
                 if mutation is None:
+                    flows.close_flow(key)
+                elif mutation.config.to_delete:
                     flows.delete_flow(key)
                 else:
                     flows.upsert_flow(key, mutation.config)

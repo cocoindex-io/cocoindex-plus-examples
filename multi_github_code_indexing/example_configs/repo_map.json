@@ -24,5 +24,11 @@
         "excluded_patterns": [
             "**/.*"
         ]
+    },
+    "cocoindex_rs": {
+        "repo_owner": "cocoindex-io",
+        "repo_name": "cocoindex",
+        "git_ref": "main",
+        "to_delete": true
     }
 }
