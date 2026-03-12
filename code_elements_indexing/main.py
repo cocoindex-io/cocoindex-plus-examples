@@ -74,6 +74,10 @@ _CODE_ELEMENTS_LANGUAGE_CONFIG: dict[
                 name_field="name"
             ),
         },
+        exclude_reference_patterns=[
+            r"[A-Z]",
+            r"Expression\..*",
+        ],
     ),
 }
 
