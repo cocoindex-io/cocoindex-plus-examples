@@ -1,365 +1,353 @@
 # © 2025 CocoIndex Inc. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
+"""
+Multi-tenant GitHub Code Indexing (v1) — CocoIndex pipeline example.
 
-from dataclasses import dataclass
+Indexes many GitHub repositories at once, one *tenant* per entry in a JSON
+config file. Tenant configs are picked up live: edit ``example_configs/*.json``
+and the affected tenants are added/removed without restarting the app.
+
+Compared with v0, v1 doesn't need a separate "meta flow" + custom
+``TargetSpec`` to manage tenants. The component tree gives us that for
+free: a tenant key is just a component subpath under the config-file
+component. Adding a key in the JSON creates a new component; removing a
+key drops the component (and its rows). Changing a key's config
+re-mounts the tenant with the new parameters.
+
+Indexing (catch-up):
+    cocoindex update main
+
+Indexing (live — watches the config dir AND polls each tenant every 5 minutes):
+    cocoindex update -L main
+
+Query:
+    python main.py "your query"
+
+Environment:
+    GITHUB_APP_ID         — your GitHub App ID
+    GITHUB_PRIVATE_KEY_PATH — filesystem path to the App's PEM private key
+    POSTGRES_URL          — connection string for the target database
+
+Note on rate limiting: v1's GitHub connector doesn't yet have an
+in-process throttle, so several tenants walking the same App in parallel
+can burst against the GitHub API. The 429-retry loop will recover, but
+if you have many tenants consider staggering the auto_refresh intervals
+or running fewer concurrent tenants.
+"""
+
+from __future__ import annotations
+
+import asyncio
 import datetime
-from threading import Lock
 import json
-import functools
-import dotenv
-from psycopg_pool import ConnectionPool
-from pgvector.psycopg import register_vector
-
-import cocoindex
 import os
+import pathlib
+import sys
+from dataclasses import dataclass
+from dotenv import load_dotenv
+from typing import Annotated, Any, AsyncIterator
+
+import asyncpg
+from pgvector.asyncpg import register_vector
 from numpy.typing import NDArray
-import numpy as np
 
-# Add a safeguard period for now. A flow, if closing happens more than this
-# duration after it is opened, avoid closing it.
-# This is because currently configs from different source files are treated as
-# different source rows, so a upsert + a delete are triggered in parallel for
-# the specific config item. This adds a safeguard period to avoid closing the
-# flow immediately after it is opened in this case.
-# After we have official source-level multi-tenant support, we won't need this.
-FLOW_OPEN_SAFEGUARD_DURATION = datetime.timedelta(seconds=5)
+import cocoindex as coco
+from cocoindex.connectors import github, localfs, postgres
+from cocoindex.ops.text import RecursiveSplitter, detect_code_language
+from cocoindex.ops.sentence_transformers import SentenceTransformerEmbedder
+from cocoindex.resources.chunk import Chunk
+from cocoindex.resources.file import PatternFilePathMatcher
+from cocoindex.resources.id import IdGenerator
 
 
-# Config for a GitHub repo to be indexed.
-@dataclass
-class _GitHubRepoConfig:
+DATABASE_URL = os.getenv(
+    "POSTGRES_URL", "postgres://cocoindex:cocoindex@localhost/cocoindex"
+)
+TABLE_NAME = "multi_github_code_indexing"
+PG_SCHEMA_NAME = "coco_examples"
+TOP_K = 5
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+PG_DB = coco.ContextKey[asyncpg.Pool]("multi_github_code_embedding_db")
+EMBEDDER = coco.ContextKey[SentenceTransformerEmbedder]("embedder", detect_change=True)
+
+_splitter = RecursiveSplitter()
+
+
+# ---------------------------------------------------------------------------
+# Per-tenant config
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _RepoConfig:
+    """One tenant's worth of repo coordinates + filter rules.
+
+    Encoded directly as a row in the JSON config file. ``to_delete`` is the
+    sentinel used by callers to remove a tenant — we skip it in
+    ``parse_tenant_configs`` so the tenant never gets mounted.
+    """
+
     repo_owner: str
     repo_name: str
     git_ref: str
-
-    path: str | None = None
     included_patterns: list[str] | None = None
     excluded_patterns: list[str] | None = None
 
-    to_delete: bool = False
+
+def parse_tenant_configs(text: str) -> dict[str, _RepoConfig]:
+    """Parse a config file body into ``{tenant_key: _RepoConfig}``.
+
+    ``to_delete: true`` entries are filtered out so the corresponding
+    component never gets mounted on this run — CocoIndex's standard
+    cleanup then removes the tenant's rows.
+    """
+    raw: dict[str, dict[str, Any]] = json.loads(text)
+    out: dict[str, _RepoConfig] = {}
+    for tenant_key, cfg in raw.items():
+        if cfg.get("to_delete"):
+            continue
+        out[tenant_key] = _RepoConfig(
+            repo_owner=cfg["repo_owner"],
+            repo_name=cfg["repo_name"],
+            git_ref=cfg["git_ref"],
+            included_patterns=cfg.get("included_patterns"),
+            excluded_patterns=cfg.get("excluded_patterns"),
+        )
+    return out
 
 
-def _get_github_app_spec() -> cocoindex.sources.GitHubApp:
-    return cocoindex.sources.GitHubApp(
-        app_id=int(os.environ["GITHUB_APP_ID"]),
-        private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-        # Global rate limit shared by all sources using the same app.
-        rate_limit=cocoindex.RateLimit(max_rows_per_second=1),
-    )
-
-
-####################################################################################################
-# Code to define meta flow: the CocoIndex flow that manages code indexing flows for multiple repos.
-####################################################################################################
+# ---------------------------------------------------------------------------
+# Schema + lifespan
+# ---------------------------------------------------------------------------
 
 
 @dataclass
-class _GitHubRepoConfigRow:
-    config: _GitHubRepoConfig
+class CodeEmbedding:
+    id: int
+    tenant_key: str
+    filename: str
+    code: str
+    embedding: Annotated[NDArray, EMBEDDER]
+    start_line: int
+    end_line: int
 
 
-# Manager for all code indexing flows.
-class _CodeIndexingFlows:
-    _flow_name_prefix: str
-    _flows_lock: Lock
-    _flows: dict[
-        str, tuple[cocoindex.Flow, cocoindex.FlowLiveUpdater, datetime.datetime]
-    ]
-
-    def __init__(self, flow_name_prefix: str):
-        self._flow_name_prefix = flow_name_prefix
-        self._flows_lock = Lock()
-        self._flows = {}
-
-    def upsert_flow(self, key: str, repo_config: _GitHubRepoConfig) -> None:
-        with self._flows_lock:
-            if key in self._flows:
-                existing_flow, updater, _ = self._flows[key]
-                updater.abort()
-                updater.wait()
-                existing_flow.close()
-                del self._flows[key]
-
-            flow = _build_code_indexing_flow(
-                f"{self._flow_name_prefix}_{key}", repo_config
-            )
-            try:
-                flow.setup(report_to_stdout=True)
-                updater = cocoindex.FlowLiveUpdater(
-                    flow, cocoindex.FlowLiveUpdaterOptions(print_stats=True)
-                )
-                updater.start()
-            except Exception as e:
-                flow.close()
-                raise e
-            self._flows[key] = (flow, updater, datetime.datetime.now())
-
-    def delete_flow(self, key: str) -> None:
-        with self._flows_lock:
-            # Known limitation: if the flow is not loaded in memory, we cannot drop it.
-            # This is because currently dropping a flow requires analyzing the flow first.
-            # We will lift this limitation and allow to directly drop the flow by name later.
-
-            if key in self._flows:
-                flow, updater, _ = self._flows[key]
-                updater.abort()
-                updater.wait()
-                flow.drop(report_to_stdout=True)
-
-    def close_flow(self, key: str) -> None:
-        with self._flows_lock:
-            if key in self._flows:
-                flow, updater, open_time = self._flows[key]
-                open_duration = datetime.datetime.now() - open_time
-                if open_duration > FLOW_OPEN_SAFEGUARD_DURATION:
-                    print(f"Closing flow {key}.")
-                    updater.abort()
-                    updater.wait()
-                    flow.close()
-                    del self._flows[key]
-                else:
-                    print(
-                        f"Skipping closing flow {key} because it has been open for {open_duration} < {FLOW_OPEN_SAFEGUARD_DURATION}."
-                    )
+@coco.lifespan
+async def coco_lifespan(
+    builder: coco.EnvironmentBuilder,
+) -> AsyncIterator[None]:
+    async with asyncpg.create_pool(DATABASE_URL) as pool:
+        builder.provide(PG_DB, pool)
+        builder.provide(EMBEDDER, SentenceTransformerEmbedder(EMBED_MODEL))
+        yield
 
 
-# _CodeIndexingFlowsManager is a CocoIndex target that synchronizes all repo configs with
-# _CodeIndexingFlows.
-class _CodeIndexingFlowsManager(cocoindex.op.TargetSpec):
-    indexing_flow_name_prefix: str
+# ---------------------------------------------------------------------------
+# Per-file processing (innermost layer)
+# ---------------------------------------------------------------------------
 
 
-@cocoindex.op.target_connector(spec_cls=_CodeIndexingFlowsManager)
-class _CodeIndexingFlowsManagerConnector:
-    @staticmethod
-    def get_persistent_key(spec: _CodeIndexingFlowsManager, target_name: str) -> str:
-        return spec.indexing_flow_name_prefix
-
-    @staticmethod
-    def apply_setup_change(
-        key: str,
-        previous: _CodeIndexingFlowsManager | None,
-        current: _CodeIndexingFlowsManager | None,
-    ) -> None:
-        pass
-
-    @staticmethod
-    def prepare(spec: _CodeIndexingFlowsManager) -> _CodeIndexingFlows:
-        return _CodeIndexingFlows(spec.indexing_flow_name_prefix)
-
-    @staticmethod
-    def mutate(
-        *all_mutations: tuple[
-            _CodeIndexingFlows, dict[str, _GitHubRepoConfigRow | None]
-        ],
-    ) -> None:
-        for flows, mutations in all_mutations:
-            for key, mutation in mutations.items():
-                if mutation is None:
-                    flows.close_flow(key)
-                elif mutation.config.to_delete:
-                    flows.delete_flow(key)
-                else:
-                    flows.upsert_flow(key, mutation.config)
-
-
-# Helper function to parse the repo config file.
-@cocoindex.op.function()
-def parse_repo_config(repo_config: str) -> dict[str, _GitHubRepoConfigRow]:
-    configs = json.loads(repo_config)
-    return {
-        key: _GitHubRepoConfigRow(config=_GitHubRepoConfig(**config))
-        for key, config in configs.items()
-    }
-
-
-# Now define the meta flow that manages all code indexing flows.
-@cocoindex.flow_def(name="MultiGithubCodeIndexing")
-def meta_flow(
-    flow_builder: cocoindex.FlowBuilder, data_scope: cocoindex.DataScope
+@coco.fn
+async def process_chunk(
+    chunk: Chunk,
+    tenant_key: str,
+    filename: pathlib.PurePath,
+    id_gen: IdGenerator,
+    table: postgres.TableTarget[CodeEmbedding],
 ) -> None:
-    data_scope["config_files"] = flow_builder.add_source(
-        cocoindex.sources.LocalFile(
-            path="example_configs", included_patterns=["*.json"]
+    embedding = await coco.use_context(EMBEDDER).embed(chunk.text)
+    table.declare_row(
+        row=CodeEmbedding(
+            id=await id_gen.next_id(chunk.text),
+            tenant_key=tenant_key,
+            filename=str(filename),
+            code=chunk.text,
+            embedding=embedding,
+            start_line=chunk.start.line,
+            end_line=chunk.end.line,
         ),
-        # Using LocalFile for simplicity, but you can also switch to GitHub source to read configs
-        # from a GitHub repo, e.g.,
-        #
-        #   cocoindex.sources.GitHub(
-        #       app=_get_github_app_spec(),
-        #       owner="cocoindex-io",
-        #       repo="cocoindex-plus",
-        #       git_ref="main",
-        #       path="examples/multi_github_code_indexing/example_configs",
-        #       included_patterns=["*.json"],
-        #   ),
-        refresh_interval=datetime.timedelta(seconds=10),
     )
-    repo_configs = data_scope.add_collector()
-    with data_scope["config_files"].row() as config_file:
-        config_file["configs"] = config_file["content"].transform(parse_repo_config)
-        with config_file["configs"].row() as config_item:
-            repo_configs.collect(
-                key=config_item[cocoindex.typing.KEY_FIELD_NAME],
-                config=config_item["config"],
-            )
 
-    repo_configs.export(
-        "flows_manager",
-        _CodeIndexingFlowsManager(
-            indexing_flow_name_prefix="multi_github_indexing",
+
+@coco.fn
+async def process_file(
+    file: github.File,
+    tenant_key: str,
+    table: postgres.TableTarget[CodeEmbedding],
+) -> None:
+    text = await file.read_text()
+    language = detect_code_language(filename=file.file_path.path.name)
+    chunks = _splitter.split(
+        text,
+        chunk_size=1000,
+        min_chunk_size=300,
+        chunk_overlap=300,
+        language=language,
+    )
+    id_gen = IdGenerator()
+    await coco.map(
+        process_chunk, chunks, tenant_key, file.file_path.path, id_gen, table
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-tenant + per-config-file orchestration
+# ---------------------------------------------------------------------------
+
+
+async def sync_tenant_repo(
+    tenant_key: str,
+    config: _RepoConfig,
+    target_table: postgres.TableTarget[CodeEmbedding],
+) -> None:
+    """One refresh cycle for one tenant: resolve the configured ref, walk
+    the tree, mount each matching file as a per-file processing component.
+
+    Wrapped in ``coco.auto_refresh`` by the caller so live mode polls
+    GitHub on a fixed interval. SHA-keyed memoization means unchanged
+    blobs are not re-read or re-embedded between cycles.
+    """
+    async with github.GitHubRepo(
+        app=github.GitHubApp(
+            app_id=int(os.environ["GITHUB_APP_ID"]),
+            private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
         ),
-        primary_key_fields=["key"],
-    )
-
-
-####################################################################################################
-# Code to define code indexing flows.
-####################################################################################################
-
-
-@cocoindex.op.function()
-def extract_extension(filename: str) -> str:
-    """Extract the extension of a filename."""
-    return os.path.splitext(filename)[1]
-
-
-@cocoindex.transform_flow()
-def code_to_embedding(
-    text: cocoindex.DataSlice[str],
-) -> cocoindex.DataSlice[NDArray[np.float32]]:
-    """
-    Embed the text using a SentenceTransformer model.
-    """
-    # You can also switch to Voyage embedding model:
-    #    return text.transform(
-    #        cocoindex.functions.EmbedText(
-    #            api_type=cocoindex.LlmApiType.VOYAGE,
-    #            model="voyage-code-3",
-    #        )
-    #    )
-    return text.transform(
-        cocoindex.functions.SentenceTransformerEmbed(
-            model="sentence-transformers/all-MiniLM-L6-v2"
-        )
-    )
-
-
-@functools.cache
-def connection_pool() -> ConnectionPool:
-    """
-    Get a connection pool to the database.
-    """
-    return ConnectionPool(os.environ["COCOINDEX_DATABASE_URL"])
-
-
-TOP_K = 5
-
-
-# This is the factory function that builds the code indexing flow for a given repo info.
-def _build_code_indexing_flow(
-    flow_name: str, repo_config: _GitHubRepoConfig
-) -> cocoindex.Flow:
-    """
-    Define an example flow that embeds files into a vector database.
-    """
-
-    @cocoindex.flow_def(name=flow_name)
-    def flow(
-        flow_builder: cocoindex.FlowBuilder, data_scope: cocoindex.DataScope
-    ) -> None:
-        data_scope["files"] = flow_builder.add_source(
-            cocoindex.sources.GitHub(
-                app=_get_github_app_spec(),
-                owner=repo_config.repo_owner,
-                repo=repo_config.repo_name,
-                git_ref=repo_config.git_ref,
-                path=repo_config.path,
-                included_patterns=repo_config.included_patterns,
-                excluded_patterns=repo_config.excluded_patterns,
+        owner=config.repo_owner,
+        repo=config.repo_name,
+    ) as gh_repo:
+        commit = await gh_repo.get_commit(ref=config.git_ref)
+        await github.mount_each_file(
+            process_file,
+            commit,
+            github.WalkOptions(
+                path_matcher=PatternFilePathMatcher(
+                    included_patterns=config.included_patterns,
+                    excluded_patterns=config.excluded_patterns,
+                ),
             ),
-            refresh_interval=datetime.timedelta(seconds=60),
-        )
-        code_embeddings = data_scope.add_collector()
-
-        with data_scope["files"].row() as file:
-            file["extension"] = file["filename"].transform(extract_extension)
-            file["chunks"] = file["content"].transform(
-                cocoindex.functions.SplitRecursively(),
-                language=file["extension"],
-                chunk_size=1000,
-                min_chunk_size=300,
-                chunk_overlap=300,
-            )
-            with file["chunks"].row() as chunk:
-                chunk["embedding"] = chunk["text"].call(code_to_embedding)
-                code_embeddings.collect(
-                    filename=file["filename"],
-                    location=chunk["location"],
-                    code=chunk["text"],
-                    embedding=chunk["embedding"],
-                    start=chunk["start"],
-                    end=chunk["end"],
-                )
-
-        code_embeddings.export(
-            "code_embeddings",
-            cocoindex.targets.Postgres(),
-            primary_key_fields=["filename", "location"],
-            vector_indexes=[
-                cocoindex.VectorIndexDef(
-                    field_name="embedding",
-                    metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
-                )
-            ],
+            tenant_key,
+            target_table,
         )
 
-    @flow.query_handler(
-        name="search",
-        result_fields=cocoindex.QueryHandlerResultFields(
-            embedding=["embedding"], score="score"
+
+@coco.fn
+async def process_config_file(
+    file: localfs.File,
+    target_table: postgres.TableTarget[CodeEmbedding],
+) -> None:
+    """One config file → many tenants. Re-runs when the file's content
+    changes; mounts one ``sync_tenant_repo`` component per tenant key
+    under this file's component subpath. Adding or removing a tenant in
+    the JSON updates the mount tree on next file change."""
+    text = await file.read_text()
+    configs = parse_tenant_configs(text)
+
+    async def _mount_tenant(tenant_key: str, config: _RepoConfig) -> None:
+        await coco.mount(
+            coco.component_subpath(tenant_key),
+            coco.auto_refresh(sync_tenant_repo, interval=datetime.timedelta(seconds=10)),
+            tenant_key,
+            config,
+            target_table,
+        )
+
+    await asyncio.gather(*[_mount_tenant(k, v) for k, v in configs.items()])
+
+
+@coco.fn
+async def app_main(config_dir: pathlib.Path) -> None:
+    target_table = await postgres.mount_table_target(
+        PG_DB,
+        table_name=TABLE_NAME,
+        table_schema=await postgres.TableSchema.from_class(
+            CodeEmbedding,
+            primary_key=["id"],
         ),
+        pg_schema_name=PG_SCHEMA_NAME,
     )
-    def search(query: str) -> None:
-        # Get the table name, for the export target in the github_code_indexing_flow above.
-        table_name = cocoindex.utils.get_target_default_name(flow, "code_embeddings")
-        # Evaluate the transform flow defined above with the input query, to get the embedding.
-        query_vector = code_to_embedding.eval(query)
-        # Run the query and get the results.
-        with connection_pool().connection() as conn:
-            register_vector(conn)
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    SELECT filename, code, embedding, embedding <=> %s AS distance, start, "end"
-                    FROM {table_name} ORDER BY distance LIMIT %s
-                """,
-                    (query_vector, TOP_K),
-                )
-                return cocoindex.QueryOutput(
-                    query_info=cocoindex.QueryInfo(
-                        embedding=query_vector,
-                        similarity_metric=cocoindex.VectorSimilarityMetric.COSINE_SIMILARITY,
-                    ),
-                    results=[
-                        {
-                            "filename": row[0],
-                            "code": row[1],
-                            "embedding": row[2],
-                            "score": 1.0 - row[3],
-                            "start": row[4],
-                            "end": row[5],
-                        }
-                        for row in cur.fetchall()
-                    ],
-                )
+    target_table.declare_vector_index(column="embedding")
 
-    return flow
+    config_files = localfs.walk_dir(
+        config_dir,
+        recursive=False,
+        path_matcher=PatternFilePathMatcher(included_patterns=["*.json"]),
+        live=True,
+    )
+    # NOTE: We don't `mount` for each config file, given we don't treat config files
+    # as part of the component path. So that if a tenant's config is moved across config files,
+    # 
+    await coco.map(process_config_file, config_files, target_table)
+
+
+app = coco.App(
+    coco.AppConfig(name="MultiGitHubCodeIndexing"),
+    app_main,
+    config_dir=pathlib.Path(__file__).parent / "example_configs",
+)
+
+
+# ---------------------------------------------------------------------------
+# Query demo
+# ---------------------------------------------------------------------------
+
+
+async def query_once(
+    pool: asyncpg.Pool,
+    embedder: SentenceTransformerEmbedder,
+    query: str,
+    *,
+    tenant_key: str | None = None,
+    top_k: int = TOP_K,
+) -> None:
+    query_vec = await embedder.embed(query)
+    where_clause = "" if tenant_key is None else f"WHERE tenant_key = $3"
+    args: list[Any] = [query_vec, top_k]
+    if tenant_key is not None:
+        args.append(tenant_key)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                tenant_key,
+                filename,
+                code,
+                embedding <=> $1 AS distance,
+                start_line,
+                end_line
+            FROM "{PG_SCHEMA_NAME}"."{TABLE_NAME}"
+            {where_clause}
+            ORDER BY distance ASC
+            LIMIT $2
+            """,
+            *args,
+        )
+
+    for r in rows:
+        score = 1.0 - float(r["distance"])
+        print(
+            f"[{score:.3f}] [{r['tenant_key']}] {r['filename']} "
+            f"(L{r['start_line']}-L{r['end_line']})"
+        )
+        print(f"    {r['code']}")
+        print("---")
+
+
+async def query(initial_query: str | None = None) -> None:
+    embedder = SentenceTransformerEmbedder(EMBED_MODEL)
+    async with asyncpg.create_pool(DATABASE_URL, init=register_vector) as pool:
+        if initial_query is not None:
+            await query_once(pool, embedder, initial_query)
+            return
+
+        while True:
+            q = input("Enter search query (or Enter to quit): ").strip()
+            if not q:
+                break
+            await query_once(pool, embedder, q)
 
 
 if __name__ == "__main__":
-    dotenv.load_dotenv()
-    cocoindex.init()
-    options = cocoindex.FlowLiveUpdaterOptions(print_stats=True, reexport_targets=True)
-    with cocoindex.FlowLiveUpdater(meta_flow, options) as updater:
-        updater.wait()
+    load_dotenv()
+    initial = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    asyncio.run(query(initial))

@@ -3,69 +3,114 @@
 SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 -->
 
-# Build index for multiple GitHub repositories (meta flow + code indexing flows)
+# Multi-tenant GitHub code indexing (v1)
 
-## Flows
+This example indexes many GitHub repositories at once — one *tenant* per entry in a JSON config file — into a single Postgres + pgvector table. Tenant configs are picked up live: edit `example_configs/*.json` and the affected tenants are added or removed without restarting the app.
 
-This example demonstrates how to build an index for multiple GitHub repositories using CocoIndex.
+## How it works (v1)
 
-- We use a meta flow to read a config file containing multiple GitHub repositories and derive a dedicated code indexing flow for each.
-- Each code indexing flow is instantiated based on the repository config.
+The whole pipeline is one CocoIndex `App`. Components stack as a tree:
 
-### Meta Flow
+```
+app_main
+└── localfs.walk_dir(config_dir, live=True)      # watch JSON config files
+    └── process_config_file                      # parse JSON → many tenants
+        └── per tenant_key:
+            └── coco.auto_refresh(sync_tenant_repo, interval=5min)
+                └── github.mount_each_file       # walk the configured repo
+                    └── per file: process_file → process_chunk
+```
 
-This is what the meta flow does:
+Each tenant key becomes a component subpath; CocoIndex tracks ownership of target rows by component path. Adding a key in the JSON creates a new component; removing a key (or marking it `to_delete: true`) drops the component and CocoIndex deletes its rows automatically. No manual flow management, no thread locks, no safeguard timers.
 
-1. Ingest a config file containing multiple GitHub repositories.
-2. Parse the config file to extract the repository config.
-3. Export the repository config to a custom target that captures events of adding, updating, or deleting a repository config.
+Two refresh cadences:
 
-The custom target maintains a sets of `cocoindex.Flow` instances, one for each repository config entry.
+- **Config files** — watched live via `localfs.walk_dir(live=True)`. Edits propagate within seconds.
+- **GitHub commits** — polled every 5 minutes per tenant by `coco.auto_refresh`. SHA-keyed memoization in `github.File.accept` means unchanged blobs are not re-read or re-embedded between cycles.
 
+## Config file format
 
-### Code Indexing Flow
+`example_configs/*.json` contains a map from tenant key to repo config:
 
-This is what the code indexing flow does:
+```json
+{
+  "cocoindex_md": {
+    "repo_owner": "cocoindex-io",
+    "repo_name": "cocoindex",
+    "git_ref": "main",
+    "included_patterns": ["**/*.md", "**/*.mdx"],
+    "excluded_patterns": ["**/.*", "**/target", "**/node_modules"]
+  },
+  "cocoindex_py": {
+    "repo_owner": "cocoindex-io",
+    "repo_name": "cocoindex",
+    "git_ref": "main",
+    "included_patterns": ["python/**/*.py"],
+    "excluded_patterns": ["**/.*"]
+  },
+  "cocoindex_rs": {
+    "repo_owner": "cocoindex-io",
+    "repo_name": "cocoindex",
+    "git_ref": "main",
+    "to_delete": true
+  }
+}
+```
 
-1. Ingest a GitHub repository.
-   Specific configs for the GitHub repository are parameters passed from the meta flow.
-2. For each file, perform chunking (Tree-sitter) and then embedding.
-3. We will save the embeddings and the metadata in Postgres with PGVector.
-4. Create a `.env` file from `.env.example`, and fill configurations for your GitHub app.
+`included_patterns` / `excluded_patterns` are passed straight to `PatternFilePathMatcher`. To restrict to a subdirectory, prefix the include pattern (e.g. `python/**/*.py` instead of v0's separate `path` field).
 
+## Prerequisites
 
-## Prerequisite
-[Install Postgres](https://cocoindex.io/docs/getting_started/installation#-install-postgres) if you don't have one.
+- [Install Postgres](https://cocoindex.io/docs/getting_started/installation#-install-postgres) with the `vector` extension.
+- A GitHub App with read access to the repos you want to index. Save its App ID and the PEM private key path.
+
+## Setup
+
+Copy `.env.example` to `.env` and fill in:
+
+```
+POSTGRES_URL=postgres://...
+GITHUB_APP_ID=...
+GITHUB_PRIVATE_KEY_PATH=/path/to/key.pem
+```
+
+Install:
+
+```bash
+pip install -e .
+```
 
 ## Run
 
-- Install dependencies:
-  ```bash
-  pip install -e .
-  ```
+Catch-up mode — one pass, then exit:
 
-- Setup:
+```bash
+cocoindex update main
+```
 
-  ```bash
-  cocoindex setup main.py
-  ```
+Live mode — keeps the app running, watches `example_configs/` for config changes, polls each tenant's GitHub ref every 5 minutes:
 
-- Run (which will continuously run and update the index):
+```bash
+cocoindex update -L main
+```
 
-  ```bash
-  python main.py
-  ```
+Query (per-tenant filter optional via the SQL `WHERE tenant_key = …` clause shown in `main.py`):
+
+```bash
+python main.py "your search query"
+```
+
+## Notes
+
+- **Rate limiting**: v1's GitHub connector doesn't yet have an in-process throttle. Several tenants walking the same App in parallel can briefly burst against the GitHub API; the 429-retry loop will recover. If you have many tenants, consider staggering `auto_refresh` intervals or running fewer concurrent tenants.
+- **Schema changes**: the `code_embeddings` table now has a `tenant_key` column. If you ran a previous version of this example, drop the table before re-indexing.
 
 ## CocoInsight
-I used CocoInsight (Free beta now) to troubleshoot the index generation and understand the data lineage of the pipeline.
-It just connects to your local CocoIndex server, with Zero pipeline data retention. Run the following command to start CocoInsight:
 
+Optional UI for inspecting the pipeline:
+
+```bash
+cocoindex server -ci main.py
 ```
-cocoindex server -ci --reexport main.py
-```
 
-The meta flow needs to load `cocoindex.Flow` instances in memory, so we need to use the `--reexport` option to reexport the targets each time the meta flow reloads.
-
-Then open the CocoInsight UI at [https://cocoindex.io/cocoinsight](https://cocoindex.io/cocoinsight).
-
-<img width="1305" alt="Chunking Visualization" src="https://github.com/user-attachments/assets/8e83b9a4-2bed-456b-83e5-b5381b28b84a" />
+Then open [https://cocoindex.io/cocoinsight](https://cocoindex.io/cocoinsight).
