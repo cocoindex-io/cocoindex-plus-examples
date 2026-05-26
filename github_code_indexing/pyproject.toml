@@ -7,7 +7,7 @@ version = "0.1.0"
 description = "Simple example for cocoindex: build embedding index based on GitHub repository source code."
 requires-python = ">=3.11"
 dependencies = [
-    "cocoindex-plus[embeddings,github,postgres]>=1.0.1",
+    "cocoindex-plus[embeddings,github,postgres]>=1.0.2",
     "python-dotenv>=1.0.1",
     "pgvector>=0.4.1",
     "asyncpg>=0.31",
