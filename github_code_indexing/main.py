@@ -35,6 +35,8 @@ from typing import Annotated, AsyncIterator
 
 import asyncpg
 from pgvector.asyncpg import register_vector
+import numpy as np
+from cocoindex.resources.schema import VectorSchema
 from numpy.typing import NDArray
 
 import cocoindex as coco
@@ -65,7 +67,7 @@ class CodeEmbedding:
     id: int
     filename: str
     code: str
-    embedding: Annotated[NDArray, EMBEDDER]
+    embedding: Annotated[NDArray, VectorSchema(dtype=np.dtype(np.float16), size=384)]
     start_line: int
     end_line: int
 
@@ -237,7 +239,7 @@ async def query_once(
 
 async def query(initial_query: str | None = None) -> None:
     embedder = SentenceTransformerEmbedder(EMBED_MODEL)
-    async with asyncpg.create_pool(ATABASE_URL, init=register_vector) as pool:
+    async with asyncpg.create_pool(DATABASE_URL, init=register_vector) as pool:
         if initial_query is not None:
             await query_once(pool, embedder, initial_query)
             return
