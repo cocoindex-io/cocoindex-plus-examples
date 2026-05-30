@@ -70,6 +70,7 @@ TOP_K = 5
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 PG_DB = coco.ContextKey[asyncpg.Pool]("multi_github_code_embedding_db")
 EMBEDDER = coco.ContextKey[SentenceTransformerEmbedder]("embedder", detect_change=True)
+GITHUB_APP = coco.ContextKey[github.GitHubApp]("github_app")
 
 _splitter = RecursiveSplitter()
 
@@ -140,6 +141,13 @@ async def coco_lifespan(
     async with asyncpg.create_pool(DATABASE_URL) as pool:
         builder.provide(PG_DB, pool)
         builder.provide(EMBEDDER, SentenceTransformerEmbedder(EMBED_MODEL))
+        builder.provide(
+            GITHUB_APP,
+            github.GitHubApp(
+                app_id=int(os.environ["GITHUB_APP_ID"]),
+                private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
+            ),
+        )
         yield
 
 
@@ -208,27 +216,25 @@ async def sync_tenant_repo(
     GitHub on a fixed interval. SHA-keyed memoization means unchanged
     blobs are not re-read or re-embedded between cycles.
     """
-    async with github.GitHubRepo(
-        app=github.GitHubApp(
-            app_id=int(os.environ["GITHUB_APP_ID"]),
-            private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-        ),
-        owner=config.repo_owner,
-        repo=config.repo_name,
-    ) as gh_repo:
-        commit = await gh_repo.get_commit(ref=config.git_ref)
-        await github.mount_each_file(
-            process_file,
-            commit,
-            github.WalkOptions(
-                path_matcher=PatternFilePathMatcher(
-                    included_patterns=config.included_patterns,
-                    excluded_patterns=config.excluded_patterns,
+    with coco.stats_group(f"tenant:{tenant_key}", report_to_stdout=True):
+        async with github.GitHubRepo(
+            app=coco.use_context(GITHUB_APP),
+            owner=config.repo_owner,
+            repo=config.repo_name,
+        ) as gh_repo:
+            commit = await gh_repo.get_commit(ref=config.git_ref)
+            await github.mount_each_file(
+                process_file,
+                commit,
+                github.WalkOptions(
+                    path_matcher=PatternFilePathMatcher(
+                        included_patterns=config.included_patterns,
+                        excluded_patterns=config.excluded_patterns,
+                    ),
                 ),
-            ),
-            tenant_key,
-            target_table,
-        )
+                tenant_key,
+                target_table,
+            )
 
 
 @coco.fn
@@ -246,7 +252,9 @@ async def process_config_file(
     async def _mount_tenant(tenant_key: str, config: _RepoConfig) -> None:
         await coco.mount(
             coco.component_subpath(tenant_key),
-            coco.auto_refresh(sync_tenant_repo, interval=datetime.timedelta(seconds=10)),
+            coco.auto_refresh(
+                sync_tenant_repo, interval=datetime.timedelta(seconds=10)
+            ),
             tenant_key,
             config,
             target_table,
@@ -276,7 +284,7 @@ async def app_main(config_dir: pathlib.Path) -> None:
     )
     # NOTE: We don't `mount` for each config file, given we don't treat config files
     # as part of the component path. So that if a tenant's config is moved across config files,
-    # 
+    #
     await coco.map(process_config_file, config_files, target_table)
 
 
