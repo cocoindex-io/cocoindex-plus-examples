@@ -51,7 +51,8 @@ from cocoindex.resources.id import IdGenerator
 DATABASE_URL = os.getenv(
     "POSTGRES_URL", "postgres://cocoindex:cocoindex@localhost/cocoindex"
 )
-TABLE_NAME = "github_code_indexing"
+# TABLE_NAME = "github_code_indexing"
+TABLE_NAME = "github_code_indexing_mini"
 PG_SCHEMA_NAME = "coco_examples"
 TOP_K = 5
 
@@ -191,14 +192,21 @@ async def app_main(owner: str, repo: str, ref: str | None) -> None:
     )
 
 
+# app = coco.App(
+#     coco.AppConfig(name="GitHubCodeIndexing"),
+#     app_main,
+#     owner="georgeh0",
+#     repo="llvm-project",
+#     ref="main",
+# )
+
 app = coco.App(
-    coco.AppConfig(name="GitHubCodeIndexing"),
+    coco.AppConfig(name="GitHubCodeIndexing_mini"),
     app_main,
     owner="cocoindex-io",
     repo="cocoindex",
     ref="main",
 )
-
 
 # ============================================================================
 # Query demo
