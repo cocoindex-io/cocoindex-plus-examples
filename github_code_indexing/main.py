@@ -37,6 +37,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 import numpy as np
 from cocoindex.resources.schema import VectorSchema
+from cocoindex.resources.rate_limit import RateLimiter
 from numpy.typing import NDArray
 
 import cocoindex as coco
@@ -135,14 +136,16 @@ async def sync_github_repo(
     up new commits at the same ref. SHA-keyed memoization means blobs whose
     content hasn't changed between polls are not re-read or re-embedded.
     """
-    async with github.GitHubRepo(
-        app=github.GitHubApp(
-            app_id=int(os.environ["GITHUB_APP_ID"]),
-            private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-        ),
-        owner=owner,
-        repo=repo,
-    ) as gh_repo:
+    async with github.GitHubApp(
+        app_id=int(os.environ["GITHUB_APP_ID"]),
+        private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
+        rate_limiter=RateLimiter(max_rows_per_second=1.0),
+    ) as app:
+        gh_repo = github.GitHubRepo(
+            app=app,
+            owner=owner,
+            repo=repo,
+        )
         commit = await gh_repo.get_commit(ref=ref)
 
         await github.mount_each_file(

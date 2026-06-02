@@ -58,6 +58,7 @@ from cocoindex.ops.sentence_transformers import SentenceTransformerEmbedder
 from cocoindex.resources.chunk import Chunk
 from cocoindex.resources.file import PatternFilePathMatcher
 from cocoindex.resources.id import IdGenerator
+from cocoindex.resources.rate_limit import RateLimiter
 
 
 DATABASE_URL = os.getenv(
@@ -138,17 +139,17 @@ class CodeEmbedding:
 async def coco_lifespan(
     builder: coco.EnvironmentBuilder,
 ) -> AsyncIterator[None]:
-    async with asyncpg.create_pool(DATABASE_URL) as pool:
-        builder.provide(PG_DB, pool)
-        builder.provide(EMBEDDER, SentenceTransformerEmbedder(EMBED_MODEL))
-        builder.provide(
-            GITHUB_APP,
-            github.GitHubApp(
-                app_id=int(os.environ["GITHUB_APP_ID"]),
-                private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-            ),
-        )
-        yield
+    await builder.provide_async_with(PG_DB, asyncpg.create_pool(DATABASE_URL))
+    builder.provide(EMBEDDER, SentenceTransformerEmbedder(EMBED_MODEL))
+    await builder.provide_async_with(
+        GITHUB_APP,
+        github.GitHubApp(
+            app_id=int(os.environ["GITHUB_APP_ID"]),
+            private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
+            rate_limiter=RateLimiter(max_rows_per_second=1.0),
+        ),
+    )
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -217,24 +218,24 @@ async def sync_tenant_repo(
     blobs are not re-read or re-embedded between cycles.
     """
     with coco.stats_group(f"tenant:{tenant_key}", report_to_stdout=True):
-        async with github.GitHubRepo(
+        gh_repo = github.GitHubRepo(
             app=coco.use_context(GITHUB_APP),
             owner=config.repo_owner,
             repo=config.repo_name,
-        ) as gh_repo:
-            commit = await gh_repo.get_commit(ref=config.git_ref)
-            await github.mount_each_file(
-                process_file,
-                commit,
-                github.WalkOptions(
-                    path_matcher=PatternFilePathMatcher(
-                        included_patterns=config.included_patterns,
-                        excluded_patterns=config.excluded_patterns,
-                    ),
+        )
+        commit = await gh_repo.get_commit(ref=config.git_ref)
+        await github.mount_each_file(
+            process_file,
+            commit,
+            github.WalkOptions(
+                path_matcher=PatternFilePathMatcher(
+                    included_patterns=config.included_patterns,
+                    excluded_patterns=config.excluded_patterns,
                 ),
-                tenant_key,
-                target_table,
-            )
+            ),
+            tenant_key,
+            target_table,
+        )
 
 
 @coco.fn
