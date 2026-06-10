@@ -53,14 +53,3 @@ We will match against user-provided text by a SQL query, reusing the embedding o
   python main.py
   ```
 
-## CocoInsight
-I used CocoInsight (Free beta now) to troubleshoot the index generation and understand the data lineage of the pipeline.
-It just connects to your local CocoIndex server, with Zero pipeline data retention. Run the following command to start CocoInsight:
-
-```
-cocoindex server -ci main.py
-```
-
-Then open the CocoInsight UI at [https://cocoindex.io/cocoinsight](https://cocoindex.io/cocoinsight).
-
-<img width="1305" alt="Chunking Visualization" src="https://github.com/user-attachments/assets/8e83b9a4-2bed-456b-83e5-b5381b28b84a" />
