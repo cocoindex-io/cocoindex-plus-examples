@@ -208,7 +208,7 @@ app = coco.App(
     app_main,
     owner="cocoindex-io",
     repo="cocoindex",
-    ref="main",
+    ref=None,
 )
 
 # ============================================================================

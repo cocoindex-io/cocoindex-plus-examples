@@ -3,20 +3,30 @@
         "repo_owner": "cocoindex-io",
         "repo_name": "cocoindex",
         "git_ref": "main",
-        "included_patterns": ["**/*.md", "**/*.mdx"],
-        "excluded_patterns": ["**/.*", "**/target", "**/node_modules"]
+        "included_patterns": [
+            "**/*.md",
+            "**/*.mdx"
+        ],
+        "excluded_patterns": [
+            "**/.*",
+            "**/target",
+            "**/node_modules"
+        ]
     },
     "cocoindex_py": {
         "repo_owner": "cocoindex-io",
         "repo_name": "cocoindex",
         "git_ref": "main",
-        "included_patterns": ["python/**/*.py"],
-        "excluded_patterns": ["**/.*"]
+        "included_patterns": [
+            "python/**/*.py"
+        ],
+        "excluded_patterns": [
+            "**/.*"
+        ]
     },
     "cocoindex_rs": {
         "repo_owner": "cocoindex-io",
         "repo_name": "cocoindex",
-        "git_ref": "main",
-        "to_delete": true
+        "git_ref": "main"
     }
 }

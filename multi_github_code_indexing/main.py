@@ -4,29 +4,47 @@
 Multi-tenant GitHub Code Indexing (v1) — CocoIndex pipeline example.
 
 Indexes many GitHub repositories at once, one *tenant* per entry in a JSON
-config file. Tenant configs are picked up live: edit ``example_configs/*.json``
-and the affected tenants are added/removed without restarting the app.
+config file. The config files themselves live in a GitHub repo too. A
+``LiveMap`` decouples the two sides:
+  * Producer — ``produce_tenant_configs`` (wrapped in ``coco.auto_refresh``)
+    polls the config repo, reads every ``*.json`` file, and declares one map
+    entry per tenant (keyed by ``tenant_key``).
+  * Consumer — ``coco.mount_each(process_tenant, config_map)`` mounts one
+    component per entry, reacting as entries appear, change, and disappear.
+Add or remove a tenant key in the config repo and the affected tenants are
+added/removed on the next config refresh — no restart.
 
 Compared with v0, v1 doesn't need a separate "meta flow" + custom
-``TargetSpec`` to manage tenants. The component tree gives us that for
-free: a tenant key is just a component subpath under the config-file
-component. Adding a key in the JSON creates a new component; removing a
-key drops the component (and its rows). Changing a key's config
-re-mounts the tenant with the new parameters.
+``TargetSpec`` to manage tenants. The ``LiveMap`` + component tree give us
+that for free: a tenant key is a map entry and a component subpath. Adding a
+key in the JSON creates a new entry → a new component; removing a key drops
+the entry → the component (and its rows). Changing a key's config re-runs the
+tenant with the new parameters.
 
-Indexing (catch-up):
+Two GitHub poll cadences:
+  * the config repo — polled by ``produce_tenant_configs`` (tenant membership)
+  * each tenant's repo — polled by ``process_tenant`` (code changes)
+
+Indexing (catch-up — one pass, then exit):
     cocoindex update main
 
-Indexing (live — watches the config dir AND polls each tenant every 5 minutes):
+Indexing (live — keeps polling the config repo AND each tenant repo):
     cocoindex update -L main
 
 Query:
     python main.py "your query"
 
 Environment:
-    GITHUB_APP_ID         — your GitHub App ID
+    GITHUB_APP_ID           — your GitHub App ID
     GITHUB_PRIVATE_KEY_PATH — filesystem path to the App's PEM private key
-    POSTGRES_URL          — connection string for the target database
+    POSTGRES_URL            — connection string for the target database
+    CONFIG_REPO_OWNER       — owner of the repo holding the tenant config files
+                              (default: cocoindex-io)
+    CONFIG_REPO_NAME        — name of that config repo
+                              (default: cocoindex-plus-examples)
+    CONFIG_GIT_REF          — ref to read configs from (default: main)
+    CONFIG_DIR              — directory in the config repo holding *.json
+                              (default: multi_github_code_indexing/example_configs)
 
 Note on rate limiting: v1's GitHub connector doesn't yet have an
 in-process throttle, so several tenants walking the same App in parallel
@@ -52,12 +70,13 @@ from pgvector.asyncpg import register_vector
 from numpy.typing import NDArray
 
 import cocoindex as coco
-from cocoindex.connectors import github, localfs, postgres
+from cocoindex.connectors import github, postgres
 from cocoindex.ops.text import RecursiveSplitter, detect_code_language
 from cocoindex.ops.sentence_transformers import SentenceTransformerEmbedder
 from cocoindex.resources.chunk import Chunk
 from cocoindex.resources.file import PatternFilePathMatcher
 from cocoindex.resources.id import IdGenerator
+from cocoindex.resources.live_map import LiveMap
 from cocoindex.resources.rate_limit import RateLimiter
 
 
@@ -67,6 +86,18 @@ DATABASE_URL = os.getenv(
 TABLE_NAME = "multi_github_code_indexing"
 PG_SCHEMA_NAME = "coco_examples"
 TOP_K = 5
+
+# Where the tenant config files live: a directory inside a GitHub repo, read
+# through the same GitHub App as the tenant repos.
+CONFIG_REPO_OWNER = os.getenv("CONFIG_REPO_OWNER", "cocoindex-io")
+CONFIG_REPO_NAME = os.getenv("CONFIG_REPO_NAME", "cocoindex-plus-examples")
+CONFIG_GIT_REF = os.getenv("CONFIG_GIT_REF", "main")
+CONFIG_DIR = os.getenv("CONFIG_DIR", "multi_github_code_indexing/example_configs")
+
+# Poll cadences. The config repo governs *which* tenants exist; each tenant
+# repo governs that tenant's code. They refresh independently.
+CONFIG_REFRESH_INTERVAL = datetime.timedelta(seconds=5)
+TENANT_REFRESH_INTERVAL = datetime.timedelta(seconds=5)
 
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 PG_DB = coco.ContextKey[asyncpg.Pool]("multi_github_code_embedding_db")
@@ -82,14 +113,27 @@ _splitter = RecursiveSplitter()
 
 
 @dataclass(frozen=True)
-class _RepoConfig:
-    """One tenant's worth of repo coordinates + filter rules.
+class _ConfigSource:
+    """Where the tenant config files live: a directory inside a GitHub repo."""
 
-    Encoded directly as a row in the JSON config file. ``to_delete`` is the
-    sentinel used by callers to remove a tenant — we skip it in
-    ``parse_tenant_configs`` so the tenant never gets mounted.
+    repo_owner: str
+    repo_name: str
+    git_ref: str
+    config_dir: pathlib.PurePosixPath
+
+
+@dataclass(frozen=True)
+class _RepoConfig:
+    """One tenant's identity (``tenant_key``) + repo coordinates + filter rules.
+
+    The repo fields are encoded directly in the JSON config file; ``tenant_key``
+    is the JSON object key, copied in by ``parse_tenant_configs``. Carrying the
+    key in the value lets it ride through the ``LiveMap`` to the consumer, which
+    ``coco.mount_each`` hands only the value. ``to_delete: true`` entries are
+    skipped in ``parse_tenant_configs`` so the tenant is never declared.
     """
 
+    tenant_key: str
     repo_owner: str
     repo_name: str
     git_ref: str
@@ -97,19 +141,21 @@ class _RepoConfig:
     excluded_patterns: list[str] | None = None
 
 
-def parse_tenant_configs(text: str) -> dict[str, _RepoConfig]:
-    """Parse a config file body into ``{tenant_key: _RepoConfig}``.
+def parse_tenant_configs(raw: dict[str, Any]) -> dict[str, _RepoConfig]:
+    """Build ``{tenant_key: _RepoConfig}`` from the merged raw JSON config map.
 
-    ``to_delete: true`` entries are filtered out so the corresponding
-    component never gets mounted on this run — CocoIndex's standard
-    cleanup then removes the tenant's rows.
+    ``_ConfigCollector`` returns plain JSON (``accept``'s memo only round-trips
+    generic types), so the typed parse into ``_RepoConfig`` happens here, after
+    the walk. ``to_delete: true`` entries are filtered out so the corresponding
+    tenant is never declared — CocoIndex's standard cleanup then removes its
+    rows.
     """
-    raw: dict[str, dict[str, Any]] = json.loads(text)
     out: dict[str, _RepoConfig] = {}
     for tenant_key, cfg in raw.items():
         if cfg.get("to_delete"):
             continue
         out[tenant_key] = _RepoConfig(
+            tenant_key=tenant_key,
             repo_owner=cfg["repo_owner"],
             repo_name=cfg["repo_name"],
             git_ref=cfg["git_ref"],
@@ -205,24 +251,92 @@ async def process_file(
 # ---------------------------------------------------------------------------
 
 
-async def sync_tenant_repo(
-    tenant_key: str,
+class _ConfigCollector(github.RepoVisitor[dict[str, Any]]):
+    """Merge the raw JSON of every ``*.json`` file in a config subtree up the
+    return-value chain, into one ``{tenant_key: raw_config}`` map.
+
+    ``T`` is ``dict[str, Any]`` — plain JSON, **not** ``_RepoConfig``:
+    ``File.accept`` / ``Dir.accept`` are memoized and their cache only
+    round-trips generic JSON types, so the caller parses the merged result with
+    ``parse_tenant_configs`` after the walk. The caller resolves the config
+    directory with ``commit.get_object(...)`` and calls ``accept`` on it, so
+    this visitor only ever sees that subtree — no pruning needed.
+
+    Config files are deliberately *not* part of the tenant component path:
+    tenants are keyed only by ``tenant_key`` (declared by the caller), so moving
+    a tenant between config files keeps the same entry (and its rows)."""
+
+    async def visit_directory(
+        self, directory: github.Dir, options: github.WalkOptions
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for child_configs in await self.process_dir_members(directory, options):
+            merged.update(child_configs)
+        return merged
+
+    async def visit_file(self, file: github.File) -> dict[str, Any]:
+        if file.file_path.path.suffix != ".json":
+            return {}
+        return json.loads(await file.read_text())
+
+
+@coco.fn
+async def produce_tenant_configs(
+    config_source: _ConfigSource,
+    config_map: LiveMap[str, _RepoConfig],
+) -> None:
+    """Producer side: one refresh cycle reads every config file from the config
+    repo and declares one ``LiveMap`` entry per tenant (keyed by ``tenant_key``).
+
+    Wrapped in ``coco.auto_refresh`` by ``app_main`` so live mode re-polls the
+    config repo on a fixed interval. Entries are owned by this component, so a
+    tenant dropped from the config (or marked ``to_delete``) stops being
+    declared and its entry — and the consumer's component and rows — go away."""
+    config_repo = github.GitHubRepo(
+        app=coco.use_context(GITHUB_APP),
+        owner=config_source.repo_owner,
+        repo=config_source.repo_name,
+    )
+    commit = await config_repo.get_commit(ref=config_source.git_ref)
+    config_root = await commit.get_object(config_source.config_dir)
+    if config_root is None:
+        raise FileNotFoundError(
+            f"config dir '{config_source.config_dir}' not found in config repo"
+        )
+    # Walk just the config subtree via a RepoVisitor; the walk mounts read-only
+    # components under "config_files/…" and returns the merged raw JSON, which
+    # we then parse into typed _RepoConfig (outside accept's generic-only memo).
+    raw_configs = await coco.use_mount(
+        coco.component_subpath(coco.Symbol("read_configs")),
+        config_root.accept,
+        _ConfigCollector(),
+        github.WalkOptions(),
+    )
+    configs = parse_tenant_configs(raw_configs)
+
+    # Declare entries after merging. So in case config files are renamed etc.
+    for tenant_key, config in configs.items():
+        config_map.declare_entry(tenant_key, config)
+
+
+@coco.fn
+async def process_tenant(
     config: _RepoConfig,
     target_table: postgres.TableTarget[CodeEmbedding],
 ) -> None:
     """One refresh cycle for one tenant: resolve the configured ref, walk
     the tree, mount each matching file as a per-file processing component.
 
-    Wrapped in ``coco.auto_refresh`` by the caller so live mode polls
+    Wrapped in ``coco.auto_refresh`` by ``process_tenant`` so live mode polls
     GitHub on a fixed interval. SHA-keyed memoization means unchanged
     blobs are not re-read or re-embedded between cycles.
     """
-    with coco.stats_group(f"tenant:{tenant_key}", report_to_stdout=True):
-        gh_repo = github.GitHubRepo(
-            app=coco.use_context(GITHUB_APP),
-            owner=config.repo_owner,
-            repo=config.repo_name,
-        )
+    gh_repo = github.GitHubRepo(
+        app=coco.use_context(GITHUB_APP),
+        owner=config.repo_owner,
+        repo=config.repo_name,
+    )
+    with coco.stats_group(f"tenant:{config.tenant_key}", report_to_stdout=True):
         commit = await gh_repo.get_commit(ref=config.git_ref)
         await github.mount_each_file(
             process_file,
@@ -233,39 +347,13 @@ async def sync_tenant_repo(
                     excluded_patterns=config.excluded_patterns,
                 ),
             ),
-            tenant_key,
+            config.tenant_key,
             target_table,
         )
 
 
 @coco.fn
-async def process_config_file(
-    file: localfs.File,
-    target_table: postgres.TableTarget[CodeEmbedding],
-) -> None:
-    """One config file → many tenants. Re-runs when the file's content
-    changes; mounts one ``sync_tenant_repo`` component per tenant key
-    under this file's component subpath. Adding or removing a tenant in
-    the JSON updates the mount tree on next file change."""
-    text = await file.read_text()
-    configs = parse_tenant_configs(text)
-
-    async def _mount_tenant(tenant_key: str, config: _RepoConfig) -> None:
-        await coco.mount(
-            coco.component_subpath(tenant_key),
-            coco.auto_refresh(
-                sync_tenant_repo, interval=datetime.timedelta(seconds=10)
-            ),
-            tenant_key,
-            config,
-            target_table,
-        )
-
-    await asyncio.gather(*[_mount_tenant(k, v) for k, v in configs.items()])
-
-
-@coco.fn
-async def app_main(config_dir: pathlib.Path) -> None:
+async def app_main(config_source: _ConfigSource) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
         table_name=TABLE_NAME,
@@ -277,22 +365,42 @@ async def app_main(config_dir: pathlib.Path) -> None:
     )
     target_table.declare_vector_index(column="embedding")
 
-    config_files = localfs.walk_dir(
-        config_dir,
-        recursive=False,
-        path_matcher=PatternFilePathMatcher(included_patterns=["*.json"]),
-        live=True,
+    # A LiveMap decouples the two sides: the producer polls the config repo and
+    # declares one entry per tenant; the consumer mounts one component per entry.
+    config_map: LiveMap[str, _RepoConfig] = await LiveMap.create()
+
+    # Producer — GitHub has no filesystem-style watch, so we poll the config
+    # repo on a fixed interval instead of `localfs.walk_dir(live=True)`. Await
+    # its readiness so the map is populated before the consumer scans it.
+    producer = await coco.mount(
+        coco.auto_refresh(produce_tenant_configs, interval=CONFIG_REFRESH_INTERVAL),
+        config_source,
+        config_map,
     )
-    # NOTE: We don't `mount` for each config file, given we don't treat config files
-    # as part of the component path. So that if a tenant's config is moved across config files,
-    #
-    await coco.map(process_config_file, config_files, target_table)
+
+    # Important: make sure the initial configs are loaded before mounting `process_tenant`.
+    # Otherwise `process_tenant` might run on partial or empty config, resulting in targets for
+    # certain tenants dropped.
+    await producer.ready()
+
+    # Consumer — one tenant component per live-map entry, kept in sync as the
+    # producer adds, changes, and removes entries.
+    await coco.mount_each(
+        coco.auto_refresh(process_tenant, interval=TENANT_REFRESH_INTERVAL),
+        config_map,
+        target_table,
+    )
 
 
 app = coco.App(
     coco.AppConfig(name="MultiGitHubCodeIndexing"),
     app_main,
-    config_dir=pathlib.Path(__file__).parent / "example_configs",
+    config_source=_ConfigSource(
+        repo_owner=CONFIG_REPO_OWNER,
+        repo_name=CONFIG_REPO_NAME,
+        git_ref=CONFIG_GIT_REF,
+        config_dir=pathlib.PurePosixPath(CONFIG_DIR),
+    ),
 )
 
 
