@@ -40,6 +40,7 @@ from cocoindex.ops.code_ast import ExtractCodeElements
 from cocoindex.ops.text import detect_code_language
 from cocoindex.resources.file import PatternFilePathMatcher
 from cocoindex.resources.id import UuidGenerator
+from cocoindex.resources.rate_limit import RateLimiter
 
 
 DATABASE_URL = os.getenv(
@@ -65,6 +66,7 @@ class DeclarationRow:
     entity_name: str
     parent_entity_name: str | None
     base_name: str
+    kind: str
     ast_node_kind: str
     has_body: bool
     start_line: int
@@ -134,6 +136,7 @@ async def process_file(
                 entity_name=d.entity_name,
                 parent_entity_name=d.parent_entity_name,
                 base_name=d.base_name,
+                kind=d.kind,
                 ast_node_kind=d.ast_node_kind,
                 has_body=d.has_body,
                 start_line=d.start.line,
@@ -189,14 +192,16 @@ async def sync_github_repo(
     forward. SHA-keyed memoization means unchanged blobs are not re-read or
     re-parsed between cycles.
     """
-    async with github.GitHubRepo(
-        app=github.GitHubApp(
-            app_id=int(os.environ["GITHUB_APP_ID"]),
-            private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
-        ),
-        owner=owner,
-        repo=repo,
-    ) as gh_repo:
+    async with github.GitHubApp(
+        app_id=int(os.environ["GITHUB_APP_ID"]),
+        private_key_path=os.environ["GITHUB_PRIVATE_KEY_PATH"],
+        rate_limiter=RateLimiter(max_rows_per_second=1.0),
+    ) as app:
+        gh_repo = github.GitHubRepo(
+            app=app,
+            owner=owner,
+            repo=repo,
+        )
         commit = await gh_repo.get_commit(ref=ref)
 
         await github.mount_each_file(

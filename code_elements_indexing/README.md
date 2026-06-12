@@ -69,6 +69,7 @@ cocoindex update -L main
 | `entity_name` | text | Fully qualified entity name (e.g. `OrderService.PlaceOrder`) |
 | `parent_entity_name` | text | Enclosing entity name, or null if top-level |
 | `base_name` | text | Simple (unqualified) name |
+| `kind` | text | Normalized cross-language kind (e.g. `class`, `method`, `type_alias`) |
 | `ast_node_kind` | text | TreeSitter node kind (e.g. `class_declaration`, `function_definition`) |
 | `has_body` | bool | Whether the declaration has a body |
 | `start_line` / `start_column` / `start_char_offset` | int | Start position |
