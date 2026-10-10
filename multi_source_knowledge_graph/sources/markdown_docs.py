@@ -1,5 +1,3 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """Markdown / MDX files under a folder, one Document per file."""
 
 from __future__ import annotations

@@ -1,8 +1,3 @@
-<!--
-© 2026 CocoIndex Inc. All rights reserved.
-SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
--->
-
 # Many sources, one pipeline, one knowledge graph
 
 **A Postgres catalog, a folder of Markdown docs, and the issues, pull requests, and releases of a GitHub repo land in one Neo4j graph.** Every source is a small adapter; everything after it is shared — in plain async Python. Nodes that several sources know about, the entities and the people, are [shared components](https://cocoindex.io/docs/programming_guide/processing_component#shared-components-plus): held by every source that mentions them, gone when the last one lets go.
@@ -47,18 +42,18 @@ class KnowledgeGraph:
     @coco.fn(memo=True)
     def entity_node(self, entity: Entity) -> None:            # the shared component {("entity", key)}
         self._entity_table.declare_record(row=EntityNode(key=entity.key, name=entity.name, kind=entity.kind, area=entity.area))
-        entries = coco.use_context(ENTRIES)
         for dep in entity.depends_on:
-            if dep in entries:
-                self._depends_on_rel.declare_relation(from_id=entity.key, to_id=dep)
+            self._depends_on_rel.declare_relation(from_id=entity.key, to_id=dep)
 
     @coco.fn(memo=True)
     def person_node(self, login: str) -> None:                 # the shared component {("person", login)}
         self._person_table.declare_record(row=PersonNode(login=login))
 
     async def _hold_entity(self, key: str) -> None:
+        resolver = coco.use_context(RESOLVER)
         entity = coco.use_context(ENTRIES)[key]
-        await coco.use_mount_shared(("entity", key), self.entity_node, entity)
+        depends_on = tuple(dep for dep in entity.depends_on if dep in resolver.keys)
+        await coco.use_mount_shared(("entity", key), self.entity_node, replace(entity, depends_on=depends_on))
 
     @coco.fn
     async def add_entity(self, key: str) -> None:
@@ -127,7 +122,7 @@ The source layer is what makes many sources manageable: sources enumerate in par
 
 **Shared nodes have holders, not an owner.** Every `use_mount_shared(("entity", key), …)` records a hold from the mounting component to that key; the shared component is built once (it is memoized) and every later mount is a hit that adds a hold. When a component stops mounting the key — a document re-runs and no longer mentions the entity, an issue drops out of the listing and its component is unmounted, a catalog row is deleted — its hold is dropped. When the last hold is gone, the shared component and its node and edges are garbage-collected, exactly like a regular component losing its only parent. A memoized component that is a hit keeps its holds without running. So an `Entity` exists while the catalog describes it *or* anything mentions it, a `Person` exists while any document they authored does, and no source has to know what the others hold. Every holder must mount a shared component the same way (its arguments are its memo key; if holders disagreed, the latest mount would win and they would rebuild it in turns), which is why the entity's properties come from one catalog snapshot that every holder reads.
 
-**The catalog is two context values, and only one of them is change-detected.** `RESOLVER` is the alias table that `add_document` resolves against; it has `detect_change=True`, so adding or removing an alias re-processes every document — each of them depends on it. `ENTRIES`, what the catalog says about each entity, is deliberately *not* change-detected: a memoized component inherits the dependencies of what it mounts, so tracking the entries would make every document that mentions an entity depend on the whole catalog, and editing one row's `area` would re-process hundreds of documents. Instead the row's `xmin` is the change token: an edited row re-runs its own component, which re-mounts the shared entity with the new properties as arguments, and the entity's memo misses. One edited row re-processes one row component and one entity component, and no document. The two are read in the lifespan, from the same table, with one query.
+**The catalog is two context values, and only one of them is change-detected.** `RESOLVER` is the alias table that both write steps resolve references against — a document's text and `refs`, an entity's `depends_on`; it has `detect_change=True`, so adding or removing an alias or a row re-processes every document, which each depend on it, and every catalog row component, for which it is a memo-hit re-mount unless a dependency joined or left the catalog. `ENTRIES`, what the catalog says about each entity, is deliberately *not* change-detected: a memoized component inherits the dependencies of what it mounts, so tracking the entries would make every document that mentions an entity depend on the whole catalog, and editing one row's `area` would re-process hundreds of documents. Instead the row's `xmin` is the change token: an edited row re-runs its own component, which re-mounts the shared entity with the new properties as arguments, and the entity's memo misses. One edited row re-processes one row component and one entity component, and no document. The two are read in the lifespan, from the same table, with one query.
 
 **Resolution is one seam.** `Resolver.resolve` in `catalog.py` does whole-word, case-insensitive alias matching against the catalog. Replace it with an embedding search, an LLM, or a call to your own entity-resolution service and nothing else changes.
 
@@ -145,17 +140,26 @@ The source layer is what makes many sources manageable: sources enumerate in par
 
 ## Run it
 
-**1. Start Postgres and Neo4j:**
+**1. Start Postgres and Neo4j.** Postgres holds CocoIndex's internal states and the catalog table; Neo4j is the graph:
 
 ```sh
 docker compose -f ../../dev/postgres.yaml up -d
 docker run -d -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/cocoindex --name cocoindex-neo4j neo4j:5.26-community
 ```
 
-**2. Configure and install** (`cocoindex-plus` comes from the Keygen index; `pyproject.toml` names the two environment variables that hold your installation token):
+**2. Configure and install.** Copy `.env.example` to `.env`; the defaults match the two containers above:
+
+```
+COCOINDEX_DB=postgres://cocoindex:cocoindex@localhost/cocoindex   # CocoIndex internal states
+POSTGRES_URL=postgres://cocoindex:cocoindex@localhost/cocoindex   # the catalog table
+NEO4J_URI=bolt://localhost:7687                                   # with NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
+DOCS_DIR=../../docs/src/content/docs                              # any Markdown / MDX tree
+GITHUB_REPO=cocoindex-io/cocoindex                                # GITHUB_TOKEN is optional, see below
+```
+
+`cocoindex-plus` comes from the Keygen index; `pyproject.toml` names the two environment variables that hold your installation token.
 
 ```sh
-cp .env.example .env     # defaults match the two containers above
 uv sync
 ```
 

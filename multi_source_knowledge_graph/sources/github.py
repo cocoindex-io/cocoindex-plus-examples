@@ -1,5 +1,3 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """GitHub issues, pull requests, and releases of one repo, over the REST API.
 
 Works against GitHub Enterprise by pointing GITHUB_API_URL at
@@ -87,7 +85,7 @@ async def _search(
                     item["number"],
                     GitHubRef(str(item["number"]), item["updated_at"], item),
                 )
-            if len(items) < _PAGE_SIZE:
+            if fetched >= max_items or len(items) < _PAGE_SIZE:
                 return
 
 

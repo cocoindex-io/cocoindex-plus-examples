@@ -1,5 +1,3 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """
 Multi-Source Knowledge Graph (v1) — CocoIndex Plus pipeline example, Neo4j.
 

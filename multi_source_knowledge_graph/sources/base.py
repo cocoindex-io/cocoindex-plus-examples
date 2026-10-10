@@ -1,5 +1,3 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """The two source families, with their default processing.
 
 A document source lists its items as refs and fetches one into a record; an

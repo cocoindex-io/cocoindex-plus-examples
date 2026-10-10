@@ -1,5 +1,3 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """The catalog, snapshotted into two context values when the app starts.
 
 ``Resolver`` maps free text to entity keys by whole-word alias matching. It is
@@ -51,9 +49,10 @@ class Resolver:
     @classmethod
     def from_rows(cls, rows: Iterable[CatalogRow]) -> Resolver:
         pairs = {
-            (alias.lower(), row.key)
+            (alias.strip().lower(), row.key)
             for row in rows
             for alias in (row.key, row.name, *row.aliases)
+            if alias.strip()
         }
         return cls(aliases=tuple(sorted(pairs)))
 
@@ -80,6 +79,8 @@ class Resolver:
 
     def resolve(self, text: str) -> set[str]:
         """Entity keys mentioned in ``text``."""
+        if not self.aliases:
+            return set()  # an empty alternation would match the empty string
         return {self._lookup[m.group(0)] for m in self._pattern.finditer(text.lower())}
 
 

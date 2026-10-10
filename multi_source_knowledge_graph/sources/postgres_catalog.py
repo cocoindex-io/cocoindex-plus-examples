@@ -1,11 +1,10 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """Rows of a catalog table in Postgres, one entity per row.
 
 The row's content is not read here: the catalog is snapshotted into context
-when the app starts (see ``catalog.py``), and the shared entity component
-reads it from there. A row's component exists to hold the entity's node and
-to re-run when the row changes, so the node picks up the new snapshot.
+when the app starts (see ``catalog.py``), and a row's component passes the
+snapshot's entry on as the shared entity component's arguments. The component
+exists to hold the entity's node and to re-run when the row changes, so the
+node picks up the new properties.
 """
 
 from __future__ import annotations

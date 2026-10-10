@@ -1,5 +1,3 @@
-# © 2026 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """The records a source produces, and the entities they refer to.
 
 Documents mention entities and name their authors; entities are what the
