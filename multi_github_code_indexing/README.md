@@ -1,8 +1,3 @@
-<!--
-© 2025 CocoIndex Inc. All rights reserved.
-SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
--->
-
 # Multi-tenant GitHub code indexing (v1)
 
 This example indexes many GitHub repositories at once — one *tenant* per entry in a JSON config file — into a single Postgres + pgvector table. The config files themselves live in a GitHub repo: commit a change to `*.json` there and the affected tenants are added or removed on the next config poll, without restarting the app.

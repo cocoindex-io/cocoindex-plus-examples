@@ -1,5 +1,3 @@
-# © 2025 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """
 Multi-tenant GitHub Code Indexing (v1) — CocoIndex pipeline example.
 
