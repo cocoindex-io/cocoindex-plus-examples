@@ -3,8 +3,8 @@
 The row's content is not read here: the catalog is snapshotted into context
 when the app starts (see ``catalog.py``), and a row's component passes the
 snapshot's entry on as the shared entity component's arguments. The component
-exists to hold the entity's node and to re-run when the row changes, so the
-node picks up the new properties.
+exists to be one of the entity node's owners and to re-run when the row
+changes, so the node picks up the new properties.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@
 the entity-resolution seam of the pipeline: replace it with an embedding or
 LLM resolver — or a call to an external oracle — and nothing else changes.
 ``ENTRIES`` holds what the catalog says about each entity, by key: the
-arguments every holder passes when it mounts the entity's shared component.
+arguments every owner passes when it mounts the entity's shared component.
 
 The two differ in change detection, so that each kind of catalog edit re-runs
 only the components that must see it. The resolver is change-detected: an
@@ -12,7 +12,7 @@ alias edit re-runs every document, because each resolved against the aliases.
 The entries are not: a property edit is detected by the row's ``xmin``, which
 re-runs that row's component, which re-mounts the shared entity with the new
 properties as its arguments. Change detection on the entries would make every
-holder — every document that mentions an entity — depend on the whole catalog,
+owner — every document that mentions an entity — depend on the whole catalog,
 since a memoized component inherits the dependencies of what it mounts.
 """
 

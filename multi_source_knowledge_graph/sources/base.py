@@ -4,7 +4,7 @@ A source lists its items as refs; its family says what to do with one. The
 ``Source`` base supplies ``ingest``, the source's own processing component,
 which mounts one memoized child component per ref — the family's ``process``.
 A document source fetches the ref into a record on a memo miss and hands it to
-the graph; an entity source holds the entity's shared node. A source module
+the graph; an entity source mounts the entity's shared node. A source module
 writes ``refs()``, plus ``fetch()`` for documents, and overrides ``process``
 only when its records need more than that. Either way it ends in the graph's
 ``declare_*`` methods, so the targets and the write logic stay shared.

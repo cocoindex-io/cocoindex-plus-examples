@@ -23,7 +23,7 @@ owned.
 Nodes that several sources know about — an Entity the catalog describes and
 documents mention, a Person who authored issues and releases alike — are
 shared components (CocoIndex Plus): keyed by the entity key or the login,
-held by every component that mounts them, and removed when the last holder
+owned by every component that mounts them, and removed when the last owner
 lets go.
 
 By default the catalog describes CocoIndex itself and the docs, issues, pull
