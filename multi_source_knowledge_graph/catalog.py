@@ -42,9 +42,16 @@ class CatalogRow:
 
 @dataclass(frozen=True)
 class Resolver:
-    """Every way an entity may be written, mapped to its key."""
+    """Every way an entity may be written, mapped to its key, and the pattern
+    that finds them in text.
+
+    Both are built here, at snapshot time, so the matching rule is part of the
+    change-detected value: editing it re-processes every document, as editing an
+    alias does.
+    """
 
     aliases: tuple[tuple[str, str], ...]  # (alias, entity key), sorted
+    pattern: str  # whole-word regex over every alias, longest first
 
     @classmethod
     def from_rows(cls, rows: Iterable[CatalogRow]) -> Resolver:
@@ -54,10 +61,24 @@ class Resolver:
             for alias in (row.key, row.name, *row.aliases)
             if alias.strip()
         }
-        return cls(aliases=tuple(sorted(pairs)))
+        # Longest alias first so "oci object storage" wins over "oci"; ties in
+        # alphabetical order, so the pattern — part of the change-detected
+        # value — is the same string in every process. Letters and digits
+        # delimit a word; "_" and "-" do not, so "postgres_target" and
+        # "amazon-s3" still match.
+        alternatives = "|".join(
+            re.escape(alias)
+            for alias in sorted(
+                {alias for alias, _ in pairs}, key=lambda alias: (-len(alias), alias)
+            )
+        )
+        return cls(
+            aliases=tuple(sorted(pairs)),
+            pattern=rf"(?<![a-z0-9])(?:{alternatives})(?![a-z0-9])",
+        )
 
     def __coco_memo_key__(self) -> object:
-        return self.aliases
+        return (self.aliases, self.pattern)
 
     @functools.cached_property
     def _lookup(self) -> dict[str, str]:
@@ -67,21 +88,15 @@ class Resolver:
     def keys(self) -> frozenset[str]:
         return frozenset(self._lookup.values())
 
-    @functools.cached_property
-    def _pattern(self) -> re.Pattern[str]:
-        # Longest alias first so "oci object storage" wins over "oci".
-        alternatives = "|".join(
-            re.escape(alias) for alias in sorted(self._lookup, key=len, reverse=True)
-        )
-        # Letters and digits delimit a word; "_" and "-" do not, so
-        # "postgres_target" and "amazon-s3" still match.
-        return re.compile(rf"(?<![a-z0-9])(?:{alternatives})(?![a-z0-9])")
-
+    @coco.fn
     def resolve(self, text: str) -> set[str]:
         """Entity keys mentioned in ``text``."""
         if not self.aliases:
             return set()  # an empty alternation would match the empty string
-        return {self._lookup[m.group(0)] for m in self._pattern.finditer(text.lower())}
+        # re caches compiled patterns, so compiling by source string here is free.
+        return {
+            self._lookup[m.group(0)] for m in re.finditer(self.pattern, text.lower())
+        }
 
 
 def entries_from_rows(rows: Iterable[CatalogRow]) -> dict[str, Entity]:

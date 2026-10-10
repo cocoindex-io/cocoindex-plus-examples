@@ -29,7 +29,7 @@ class CatalogRef:
 
 
 @dataclass(frozen=True)
-class PostgresCatalog(EntitySource[CatalogRef]):
+class PostgresCatalog(EntitySource):
     pool: asyncpg.Pool
     table: str
 

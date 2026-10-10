@@ -4,7 +4,7 @@ sources hold together, and the steps every record goes through on its way in.
 ``KnowledgeGraph`` is mounted once and handed to every source. A source hands
 it records; it resolves their references, declares the nodes and edges the
 record owns outright, and mounts the shared components for the nodes the
-record only holds a share of. The ``add_*`` methods are ``@coco.fn`` so an
+record only holds a share of. The ``declare_*`` methods are ``@coco.fn`` so an
 edit to this file re-syncs every source through logic tracking.
 
 Ownership, node by node:
@@ -68,24 +68,16 @@ class PersonNode:
 # schema, so the connector derives each edge's identity from its endpoints.
 
 
+@dataclass(frozen=True)
 class KnowledgeGraph:
     """Entity, Document and Person nodes with their edges, shared by all sources."""
 
-    def __init__(
-        self,
-        entity_table: neo4j.TableTarget[EntityNode],
-        document_table: neo4j.TableTarget[DocumentNode],
-        person_table: neo4j.TableTarget[PersonNode],
-        depends_on_rel: neo4j.RelationTarget[Any],
-        mentions_rel: neo4j.RelationTarget[Any],
-        authored_rel: neo4j.RelationTarget[Any],
-    ) -> None:
-        self._entity_table = entity_table
-        self._document_table = document_table
-        self._person_table = person_table
-        self._depends_on_rel = depends_on_rel
-        self._mentions_rel = mentions_rel
-        self._authored_rel = authored_rel
+    entity_table: neo4j.TableTarget[EntityNode]
+    document_table: neo4j.TableTarget[DocumentNode]
+    person_table: neo4j.TableTarget[PersonNode]
+    depends_on_rel: neo4j.RelationTarget[Any]
+    mentions_rel: neo4j.RelationTarget[Any]
+    authored_rel: neo4j.RelationTarget[Any]
 
     @classmethod
     async def mount(
@@ -109,32 +101,19 @@ class KnowledgeGraph:
             await neo4j.TableSchema.from_class(PersonNode, primary_key="login"),
             primary_key="login",
         )
-        depends_on_rel = await neo4j.mount_relation_target(
-            db, "DEPENDS_ON", entity_table, entity_table
-        )
-        mentions_rel = await neo4j.mount_relation_target(
-            db, "MENTIONS", document_table, entity_table
-        )
-        authored_rel = await neo4j.mount_relation_target(
-            db, "AUTHORED", person_table, document_table
-        )
         return cls(
-            entity_table,
-            document_table,
-            person_table,
-            depends_on_rel,
-            mentions_rel,
-            authored_rel,
-        )
-
-    def __coco_memo_key__(self) -> object:
-        return (
-            self._entity_table,
-            self._document_table,
-            self._person_table,
-            self._depends_on_rel,
-            self._mentions_rel,
-            self._authored_rel,
+            entity_table=entity_table,
+            document_table=document_table,
+            person_table=person_table,
+            depends_on_rel=await neo4j.mount_relation_target(
+                db, "DEPENDS_ON", entity_table, entity_table
+            ),
+            mentions_rel=await neo4j.mount_relation_target(
+                db, "MENTIONS", document_table, entity_table
+            ),
+            authored_rel=await neo4j.mount_relation_target(
+                db, "AUTHORED", person_table, document_table
+            ),
         )
 
     # --- Shared components: one instance per key, held by every mounter ------
@@ -142,25 +121,29 @@ class KnowledgeGraph:
     @coco.fn(memo=True)
     def entity_node(self, entity: Entity) -> None:
         """The Entity node and its DEPENDS_ON edges, a function of its arguments."""
-        self._entity_table.declare_record(
+        self.entity_table.declare_record(
             row=EntityNode(
                 key=entity.key, name=entity.name, kind=entity.kind, area=entity.area
             )
         )
         for dep in entity.depends_on:
-            self._depends_on_rel.declare_relation(from_id=entity.key, to_id=dep)
+            self.depends_on_rel.declare_relation(from_id=entity.key, to_id=dep)
 
     @coco.fn(memo=True)
     def person_node(self, login: str) -> None:
         """The Person node. Identity is the login; nothing else is shared."""
-        self._person_table.declare_record(row=PersonNode(login=login))
+        self.person_table.declare_record(row=PersonNode(login=login))
 
     # --- Write steps: what a source's record contributes ---------------------
 
-    async def _hold_entity(self, key: str) -> None:
-        # Every holder passes the same arguments: the catalog's entry, with its
-        # dependencies resolved through the resolver like a document's refs, so
-        # a dependency joining or leaving the catalog re-mounts the entity.
+    @coco.fn
+    async def declare_entity(self, key: str) -> None:
+        """Hold the shared Entity node for ``key``.
+
+        Every holder passes the same arguments: the catalog's entry, with its
+        dependencies resolved through the resolver like a document's refs, so
+        a dependency joining or leaving the catalog re-mounts the entity.
+        """
         resolver = coco.use_context(RESOLVER)
         entity = coco.use_context(ENTRIES)[key]
         depends_on = tuple(dep for dep in entity.depends_on if dep in resolver.keys)
@@ -169,16 +152,11 @@ class KnowledgeGraph:
         )
 
     @coco.fn
-    async def add_entity(self, key: str) -> None:
-        """Hold the shared Entity node for ``key``."""
-        await self._hold_entity(key)
-
-    @coco.fn
-    async def add_document(self, doc: Document) -> None:
+    async def declare_document(self, doc: Document) -> None:
         """Declare the Document node; hold and link every entity it mentions
         and the person who wrote it."""
         doc_id = f"{doc.source}:{doc.key}"
-        self._document_table.declare_record(
+        self.document_table.declare_record(
             row=DocumentNode(
                 id=doc_id,
                 source=doc.source,
@@ -193,10 +171,10 @@ class KnowledgeGraph:
         mentioned = resolver.resolve(f"{doc.title}\n{doc.text}")
         mentioned.update(ref for ref in doc.refs if ref in resolver.keys)
         for key in sorted(mentioned):
-            await self._hold_entity(key)
-            self._mentions_rel.declare_relation(from_id=doc_id, to_id=key)
+            await self.declare_entity(key)
+            self.mentions_rel.declare_relation(from_id=doc_id, to_id=key)
         if doc.author:
             await coco.use_mount_shared(
                 ("person", doc.author), self.person_node, doc.author
             )
-            self._authored_rel.declare_relation(from_id=doc.author, to_id=doc_id)
+            self.authored_rel.declare_relation(from_id=doc.author, to_id=doc_id)

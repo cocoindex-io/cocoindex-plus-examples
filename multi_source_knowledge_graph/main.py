@@ -40,6 +40,7 @@ from __future__ import annotations
 import os
 import pathlib
 from collections.abc import AsyncIterator
+from typing import Any
 
 import asyncpg
 
@@ -109,7 +110,7 @@ async def coco_lifespan(builder: coco.EnvironmentBuilder) -> AsyncIterator[None]
 @coco.fn
 async def app_main() -> None:
     # --- The registry. Adding a source to the graph is adding one line here ---
-    sources: list[Source] = [
+    sources: list[Source[Any]] = [
         PostgresCatalog("catalog", coco.use_context(CATALOG_DB), CATALOG_TABLE),
         MarkdownDocs("docs", DOCS_DIR),
         GitHubIssues("github_issues", GITHUB_REPO, GITHUB_MAX_ISSUES),
