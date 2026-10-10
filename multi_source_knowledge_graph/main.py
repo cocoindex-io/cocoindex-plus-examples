@@ -23,7 +23,7 @@ owned.
 Nodes that several sources know about — an Entity the catalog describes and
 documents mention, a Person who authored issues and releases alike — are
 shared components (CocoIndex Plus): keyed by the entity key or the login,
-held by every component that mounts them, and removed when the last holder
+owned by every component that mounts them, and removed when the last owner
 lets go.
 
 By default the catalog describes CocoIndex itself and the docs, issues, pull
@@ -40,6 +40,7 @@ from __future__ import annotations
 import os
 import pathlib
 from collections.abc import AsyncIterator
+from typing import Any
 
 import asyncpg
 
@@ -109,7 +110,7 @@ async def coco_lifespan(builder: coco.EnvironmentBuilder) -> AsyncIterator[None]
 @coco.fn
 async def app_main() -> None:
     # --- The registry. Adding a source to the graph is adding one line here ---
-    sources: list[Source] = [
+    sources: list[Source[Any]] = [
         PostgresCatalog("catalog", coco.use_context(CATALOG_DB), CATALOG_TABLE),
         MarkdownDocs("docs", DOCS_DIR),
         GitHubIssues("github_issues", GITHUB_REPO, GITHUB_MAX_ISSUES),

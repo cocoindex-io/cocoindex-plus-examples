@@ -89,6 +89,7 @@ async def _search(
                 return
 
 
+@coco.fn
 def _item_document(
     source: str, kind: str, ref: GitHubRef, refs: tuple[str, ...] = ()
 ) -> Document:

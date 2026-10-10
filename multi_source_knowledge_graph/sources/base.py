@@ -1,14 +1,13 @@
-"""The two source families, with their default processing.
+"""The source families, with their default processing.
 
-A document source lists its items as refs and fetches one into a record; an
-entity source lists the entities it knows as refs. The family base supplies
-the rest: ``process`` (one memoized child component per ref — for a document,
-fetch on a miss and hand the record to the graph; for an entity, hold its
-shared node) and ``ingest`` (the source's own processing component, which
-mounts those children). A source module writes ``refs()``, plus ``fetch()``
-for documents, and overrides ``process`` only when its records need more than
-that. Either way it ends in the graph's ``add_*`` methods, so the targets and
-the write logic stay shared.
+A source lists its items as refs; its family says what to do with one. The
+``Source`` base supplies ``ingest``, the source's own processing component,
+which mounts one memoized child component per ref — the family's ``process``.
+A document source fetches the ref into a record on a memo miss and hands it to
+the graph; an entity source mounts the entity's shared node. A source module
+writes ``refs()``, plus ``fetch()`` for documents, and overrides ``process``
+only when its records need more than that. Either way it ends in the graph's
+``declare_*`` methods, so the targets and the write logic stay shared.
 """
 
 from __future__ import annotations
@@ -26,17 +25,8 @@ from records import Document
 RefT = TypeVar("RefT")
 
 
-class Source(Protocol):
-    """What the registry needs: a name, and the ability to ingest into a graph."""
-
-    @property
-    def name(self) -> str: ...
-
-    async def ingest(self, graph: KnowledgeGraph) -> None: ...
-
-
 @dataclass(frozen=True)
-class DocumentSource(ABC, Generic[RefT]):
+class Source(ABC, Generic[RefT]):
     name: str
 
     @abstractmethod
@@ -44,18 +34,25 @@ class DocumentSource(ABC, Generic[RefT]):
         """List items cheaply; each ref carries a change token."""
 
     @abstractmethod
-    async def fetch(self, ref: RefT) -> Document:
-        """Load one item. Runs only when ``process`` misses its memo."""
-
-    @coco.fn(memo=True)
     async def process(self, ref: RefT, graph: KnowledgeGraph) -> None:
-        await graph.add_document(await self.fetch(ref))
+        """One memoized child component per ref; the family supplies it."""
 
     @coco.fn
     async def ingest(self, graph: KnowledgeGraph) -> None:
         await coco.mount_each(
             coco.component_subpath("record"), self.process, self.refs(), graph
         )
+
+
+@dataclass(frozen=True)
+class DocumentSource(Source[RefT]):
+    @abstractmethod
+    async def fetch(self, ref: RefT) -> Document:
+        """Load one item. Runs only when ``process`` misses its memo."""
+
+    @coco.fn(memo=True)
+    async def process(self, ref: RefT, graph: KnowledgeGraph) -> None:
+        await graph.declare_document(await self.fetch(ref))
 
 
 class EntityRef(Protocol):
@@ -65,23 +62,8 @@ class EntityRef(Protocol):
     def key(self) -> str: ...
 
 
-EntityRefT = TypeVar("EntityRefT", bound=EntityRef)
-
-
 @dataclass(frozen=True)
-class EntitySource(ABC, Generic[EntityRefT]):
-    name: str
-
-    @abstractmethod
-    def refs(self) -> AsyncIterable[tuple[coco.StableKey, EntityRefT]]:
-        """List entities cheaply; each ref carries a change token."""
-
+class EntitySource(Source[EntityRef]):
     @coco.fn(memo=True)
-    async def process(self, ref: EntityRefT, graph: KnowledgeGraph) -> None:
-        await graph.add_entity(ref.key)
-
-    @coco.fn
-    async def ingest(self, graph: KnowledgeGraph) -> None:
-        await coco.mount_each(
-            coco.component_subpath("record"), self.process, self.refs(), graph
-        )
+    async def process(self, ref: EntityRef, graph: KnowledgeGraph) -> None:
+        await graph.declare_entity(ref.key)

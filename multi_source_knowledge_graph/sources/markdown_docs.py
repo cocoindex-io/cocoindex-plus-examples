@@ -18,6 +18,7 @@ _FRONT_MATTER_TITLE_RE = re.compile(r"^title:\s*(.+?)\s*$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 
 
+@coco.fn
 def _title(text: str, path: str) -> str:
     if m := _FRONT_MATTER_TITLE_RE.search(text) or _HEADING_RE.search(text):
         # Starlight front-matter titles mark emphasis with asterisks.
