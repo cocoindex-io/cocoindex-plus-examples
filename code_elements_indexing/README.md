@@ -1,8 +1,3 @@
-<!--
-© 2025 CocoIndex Inc. All rights reserved.
-SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
--->
-
 # Code Elements Indexing (v1)
 
 This example uses CocoIndex to extract structural code elements from a GitHub repository — classes, functions, methods, and the call / type references between them — and index them into two PostgreSQL tables.

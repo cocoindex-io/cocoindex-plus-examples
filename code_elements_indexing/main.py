@@ -1,5 +1,3 @@
-# © 2025 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
 """
 Code Elements Indexing (v1) — CocoIndex pipeline example.
 

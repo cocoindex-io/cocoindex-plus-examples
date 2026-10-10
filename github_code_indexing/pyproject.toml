@@ -1,6 +1,3 @@
-# © 2025 CocoIndex Inc. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
-
 [project]
 name = "github-code-indexing"
 version = "0.1.0"

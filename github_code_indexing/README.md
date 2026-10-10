@@ -1,8 +1,3 @@
-<!--
-© 2025 CocoIndex Inc. All rights reserved.
-SPDX-License-Identifier: LicenseRef-CocoIndex-Proprietary
--->
-
 # Build index for GitHub repository
 
 This example demonstrates how to build an index for a GitHub repository using CocoIndex.
